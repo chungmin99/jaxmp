@@ -177,8 +177,7 @@ class RobotColl:
         override_weights: dict[str, float] = {},
     ) -> Float[Array, "colls"]:
         """Get the collision weight for each sphere."""
-        num_colls = len(self.coll)
-        coll_weights = jnp.full((num_colls,), weight)
+        coll_weights = jnp.full((self.num_colls,), weight)
         for name, weight in override_weights.items():
             idx = self.coll_link_names.index(name)
             coll_weights = jnp.where(
