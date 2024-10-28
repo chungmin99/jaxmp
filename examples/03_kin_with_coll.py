@@ -19,7 +19,7 @@ import viser
 import viser.extras
 
 from jaxmp import JaxKinTree
-from jaxmp.coll import Plane, RobotColl, Sphere
+from jaxmp.coll import Plane, RobotColl, Sphere, CollGeom
 from jaxmp.extras.urdf_loader import load_urdf
 from jaxmp.extras.solve_ik import solve_ik
 
@@ -38,6 +38,7 @@ def main(
     robot_coll = RobotColl.from_urdf(urdf)
     kin = JaxKinTree.from_urdf(urdf)
     rest_pose = (kin.limits_upper + kin.limits_lower) / 2
+    assert isinstance(robot_coll.coll, CollGeom)
 
     server = viser.ViserServer()
 
@@ -180,19 +181,13 @@ def main(
 
         urdf_vis.update_cfg(onp.array(joints))
 
-        coll = robot_coll.coll.transform(
-            jaxlie.SE3(
-                kin.forward_kinematics(joints)[..., robot_coll.link_joint_idx, :]
-            )
-        )
-        self_coll_value.value = (
-            (
-                collide(coll, coll.reshape(-1, 1)).dist.squeeze()
-                * robot_coll.self_coll_matrix
-            )
-            .min()
-            .item()
-        )
+        coll = robot_coll.at_joints(kin, joints)
+        assert isinstance(coll, CollGeom)
+        dist = collide(coll, coll.reshape(-1, 1)).dist
+        coll_list = jnp.array(robot_coll.self_coll_list)
+        dist = dist[coll_list[:, 0], coll_list[:, 1]]
+        self_coll_value.value = dist.min().item()
+
         world_coll_value.value = min(
             collide(coll, ground_obs).dist.min().item(),
             collide(coll, curr_sphere_obs).dist.min().item(),

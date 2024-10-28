@@ -25,12 +25,13 @@ def profile_ik(
     robot_description: str,
     ee_joint_name: str,
     batch_size_list: list[int],
-    device: Literal["cpu", "gpu"],
+    device: Literal["cpu", "gpu", "default"],
     solver_type: Literal["conjugate_gradient", "dense_cholesky", "cholmod"],
     with_collision: bool,
     n_trials: int,
 ):
-    jax.config.update("jax_platform_name", device)
+    if device != "default":
+        jax.config.update("jax_platform_name", device)
 
     urdf = load_urdf(robot_description)
     kin = JaxKinTree.from_urdf(urdf)
@@ -93,11 +94,12 @@ def profile_ik(
 
 def profile(
     robot: Literal["panda", "ur5", "yumi"] = "panda",
-    device: Literal["cpu", "gpu"] = "gpu",
+    device: Literal["cpu", "gpu", "default"] = "default",
     solver_type: Literal[
         "conjugate_gradient", "dense_cholesky", "cholmod"
     ] = "conjugate_gradient",
     with_collision: bool = False,
+    n_trials: int = 5,
 ):
     # TODO this isn't representative speed-wise, because the samples 
     # are from a unit sphere and not from the reachable workspace.
@@ -107,7 +109,6 @@ def profile(
 
     ee_joint_name = ROBOT_EE_JOINTS[robot]
     batch_size_list = [1, 10, 100, 1000]
-    n_trials = 10
 
     profile_ik(
         robot_description=robot,

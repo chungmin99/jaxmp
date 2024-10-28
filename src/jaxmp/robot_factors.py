@@ -1,10 +1,9 @@
 """Common `jaxls` factors for robot control, via wrapping `JaxKinTree` and `RobotColl`."""
 
-from typing import Optional
+from typing import Optional, Sequence
 
 import jax
 from jax import Array
-import jax_dataclasses as jdc
 import jax.numpy as jnp
 import jaxlie
 
@@ -126,62 +125,103 @@ class RobotFactors:
         return (vals[var] - default) * weights
 
     @staticmethod
-    def self_coll_cost(
-        vals: jaxls.VarValues,
+    def get_self_coll_factors(
         kin: JaxKinTree,
         robot_coll: RobotColl,
         var: jaxls.Var[Array],
         eta: float,
-        weights: Array,
-        base_tf_var: jaxls.Var[jaxlie.SE3] | jaxlie.SE3 | None = None,
-    ) -> Array:
+        weights: float,
+    ) -> Sequence[jaxls.Factor]:
         """Collision-scaled dist for self-collision."""
-        joint_cfg: jax.Array = vals[var]
-        if isinstance(base_tf_var, jaxls.Var):
-            base_tf = vals[base_tf_var]
-        elif isinstance(base_tf_var, jaxlie.SE3):
-            base_tf = base_tf_var
-        else:
-            base_tf = jaxlie.SE3.identity()
+        # jaxls does not support static/varying treedefs, for batching.
+        def self_coll_cost(
+            vals: jaxls.VarValues,
+            kin: JaxKinTree,
+            robot_coll: RobotColl,
+            var: jaxls.Var[Array],
+            eta: float,
+            weights: float,
+            pair: tuple[int, int],
+        ) -> Array:
+            joint_cfg = vals[var]
+            colls = robot_coll.at_joints(kin, joint_cfg)
+            assert isinstance(colls, CollGeom)
+            coll_0 = colls.slice(..., pair[0])
+            coll_1 = colls.slice(..., pair[1])
 
-        joint_cfg = vals[var]
-        Ts_joint_world = base_tf @ jaxlie.SE3(
-            kin.forward_kinematics(joint_cfg)[..., robot_coll.link_joint_idx, :]
-        )
-        coll = robot_coll.coll.transform(Ts_joint_world)
-        sdf = collide(coll.reshape(-1, 1), coll.reshape(1, -1)).dist
-        weights = weights * robot_coll.self_coll_matrix
-        return (colldist_from_sdf(sdf, eta=eta) * weights).flatten()
+            sdf = collide(coll_0, coll_1).dist
+            return (colldist_from_sdf(sdf, eta=eta) * weights).flatten()
+
+        assert isinstance(robot_coll.coll, CollGeom)
+        return [
+            jaxls.Factor(
+                self_coll_cost,
+                (
+                    kin,
+                    robot_coll,
+                    var,
+                    eta,
+                    weights,
+                    pair,
+                ),
+            )
+            for pair in robot_coll.self_coll_list
+        ]
 
     @staticmethod
-    def world_coll_cost(
-        vals: jaxls.VarValues,
+    def get_world_coll_factors(
         kin: JaxKinTree,
         robot_coll: RobotColl,
         var: jaxls.Var[Array],
         other: CollGeom,
         eta: float,
-        weights: Array,
+        weights: float,
         base_tf_var: jaxls.Var[jaxlie.SE3] | jaxlie.SE3 | None = None,
-    ) -> Array:
+    ) -> Sequence[jaxls.Factor]:
         """Collision-scaled dist for world collision."""
-        joint_cfg: jax.Array = vals[var]
-        if isinstance(base_tf_var, jaxls.Var):
-            base_tf = vals[base_tf_var]
-        elif isinstance(base_tf_var, jaxlie.SE3):
-            base_tf = base_tf_var
-        else:
-            base_tf = jaxlie.SE3.identity()
 
-        joint_cfg = vals[var]
-        Ts_joint_world = base_tf @ jaxlie.SE3(
-            kin.forward_kinematics(joint_cfg)[..., robot_coll.link_joint_idx, :]
-        )
-        coll = robot_coll.coll.transform(Ts_joint_world)
-        sdf = collide(coll, other)
-        sdf = sdf.dist
-        sdf = sdf * robot_coll.self_coll_matrix
-        return (colldist_from_sdf(sdf, eta=eta) * weights).flatten()
+        def world_coll_cost(
+            vals: jaxls.VarValues,
+            kin: JaxKinTree,
+            robot_coll: RobotColl,
+            var: jaxls.Var[Array],
+            other: CollGeom,
+            eta: float,
+            weights: float,
+            base_tf_var: jaxls.Var[jaxlie.SE3] | jaxlie.SE3 | None,
+            coll_idx: int,
+        ) -> Array:
+            joint_cfg = vals[var]
+            if isinstance(base_tf_var, jaxls.Var):
+                base_tf = vals[base_tf_var]
+            elif isinstance(base_tf_var, jaxlie.SE3):
+                base_tf = base_tf_var
+            else:
+                base_tf = jaxlie.SE3.identity()
+
+            coll = robot_coll.at_joints(kin, joint_cfg)
+            assert isinstance(coll, CollGeom)
+            coll = coll.slice(..., coll_idx).transform(base_tf)
+
+            sdf = collide(coll, other).dist
+            return (colldist_from_sdf(sdf, eta=eta) * weights).flatten()
+
+        assert isinstance(robot_coll.coll, CollGeom)
+        return [
+            jaxls.Factor(
+                world_coll_cost,
+                (
+                    kin,
+                    robot_coll,
+                    var,
+                    other,
+                    eta,
+                    weights,
+                    base_tf_var,
+                    coll_idx,
+                ),
+            ) for coll_idx in range(robot_coll.num_colls)
+        ]
 
     @staticmethod
     def smoothness_cost(

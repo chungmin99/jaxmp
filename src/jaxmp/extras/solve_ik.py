@@ -116,33 +116,26 @@ def solve_ik(
             )
 
     if robot_coll is not None:
-        factors.append(
-            jaxls.Factor(
-                RobotFactors.self_coll_cost,
-                (
-                    kin,
-                    robot_coll,
-                    JointVar(0),
-                    0.01,
-                    jnp.full(robot_coll.coll.get_batch_axes(), self_coll_weight),
-                    ConstrainedSE3Var(0),
-                ),
-            ),
+        factors.extend(
+            RobotFactors.get_self_coll_factors(
+                kin,
+                robot_coll,
+                JointVar(0),
+                0.01,
+                self_coll_weight,
+            )
         )
         for world_coll in world_coll_list:
-            factors.append(
-                jaxls.Factor(
-                    RobotFactors.world_coll_cost,
-                    (
+            factors.extend(
+                RobotFactors.get_world_coll_factors(
                         kin,
                         robot_coll,
                         JointVar(0),
                         world_coll,
                         0.1,
-                        jnp.full(robot_coll.coll.get_batch_axes(), world_coll_weight),
+                        world_coll_weight,
                         ConstrainedSE3Var(0),
-                    ),
-                ),
+                )
             )
 
     graph = jaxls.FactorGraph.make(

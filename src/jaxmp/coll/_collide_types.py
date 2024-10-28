@@ -54,6 +54,13 @@ class CollGeom(abc.ABC):
             _self.pos = tf.apply(_self.pos)
         return _self
 
+    def slice(self, *index):
+        with jdc.copy_and_mutate(self, validate=False) as _self:
+            _self.pos = self.pos[*index, :]
+            _self.mat = self.mat[*index, :, :]
+            _self.size = self.size[*index, :]
+        return _self
+
     def to_trimesh(self) -> trimesh.Trimesh:
         _self = self.reshape(-1,)
 
