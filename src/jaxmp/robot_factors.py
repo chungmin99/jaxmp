@@ -160,7 +160,7 @@ class RobotFactors:
         robot_coll: RobotColl,
         var: jaxls.Var[Array],
         other: CollGeom,
-        eta: float,
+        eta: jax.Array,
         weights: Array,
         base_tf_var: jaxls.Var[jaxlie.SE3] | jaxlie.SE3 | None = None,
     ) -> Array:

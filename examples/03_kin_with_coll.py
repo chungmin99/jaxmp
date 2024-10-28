@@ -25,7 +25,7 @@ from jaxmp.extras.solve_ik import solve_ik
 
 
 def main(
-    robot_description: str = "yumi_description",
+    robot_description: str = "yumi",
     pos_weight: float = 5.0,
     rot_weight: float = 1.0,
     rest_weight: float = 0.01,

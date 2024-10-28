@@ -1,3 +1,16 @@
+from pathlib import Path
+import time
+import viser
+from viser.extras import ViserUrdf
+
+import numpy as onp
+import jax.numpy as jnp
+import jaxlie
+
+from jaxmp import JaxKinTree, RobotFactors
+from jaxmp.coll import RobotColl, Sphere, Capsule
+from jaxmp.extras import load_urdf, lock_joints, AntipodalGrasps
+
 from typing import Literal, Optional
 
 import jax
@@ -9,6 +22,35 @@ import jax_dataclasses as jdc
 from jaxmp.robot_factors import RobotFactors
 from jaxmp.kinematics import JaxKinTree
 from jaxmp.coll import RobotColl, CollGeom
+
+def ik_cost(
+    vals: jaxls.VarValues,
+    kin: JaxKinTree,
+    var: jaxls.Var[jax.Array],
+    target_pose: jaxlie.SE3,
+    target_joint_idx: jax.Array,
+    weights: jax.Array,
+    base_tf_var: jaxls.Var[jaxlie.SE3] | jaxlie.SE3 | None = None,
+) -> jax.Array:
+    """Pose cost."""
+    joint_cfg: jax.Array = vals[var]
+    if isinstance(base_tf_var, jaxls.Var):
+        base_tf = vals[base_tf_var]
+    elif isinstance(base_tf_var, jaxlie.SE3):
+        base_tf = base_tf_var
+    else:
+        base_tf = jaxlie.SE3.identity()
+
+    Ts_joint_world = kin.forward_kinematics(joint_cfg)
+    residual = (
+        (base_tf @ jaxlie.SE3(Ts_joint_world[target_joint_idx])).inverse()
+        @ (target_pose)
+    ).log()
+    weights = jnp.broadcast_to(weights, residual.shape)
+    assert residual.shape == weights.shape
+    residual = (residual * weights)
+    residual = residual[jnp.argmin(jnp.abs(residual).sum(axis=-1))]
+    return residual.flatten()
 
 
 @jdc.jit
@@ -35,7 +77,7 @@ def solve_ik(
     ]] = "conjugate_gradient",
     freeze_target_xyz_xyz: Optional[jnp.ndarray] = None,
     freeze_base_xyz_xyz: Optional[jnp.ndarray] = None,
-    dt: float = 0.01,
+    dt: float = 0.1,
 ) -> tuple[jaxlie.SE3, jnp.ndarray]:
     """
     Solve IK for the robot.
@@ -88,9 +130,10 @@ def solve_ik(
 
     ik_weights = jnp.array([pos_weight] * 3 + [rot_weight] * 3)
     ik_weights = ik_weights * freeze_target_xyz_xyz
+    
     factors.append(
         jaxls.Factor(
-            RobotFactors.ik_cost,
+            ik_cost,
             (
                 kin,
                 joint_vars[0],
@@ -139,7 +182,7 @@ def solve_ik(
                         robot_coll,
                         JointVar(0),
                         world_coll,
-                        0.002,
+                        jnp.array([0.005]),
                         jnp.full(robot_coll.coll.get_batch_axes(), world_coll_weight),
                         ConstrainedSE3Var(0),
                     ),
@@ -167,3 +210,72 @@ def solve_ik(
     base_pose = solution[ConstrainedSE3Var(0)]
     joints = solution[JointVar(0)]
     return base_pose, joints
+
+
+if __name__ == "__main__":
+    urdf = load_urdf("panda")
+    urdf = lock_joints(
+        urdf,
+        ["panda_finger_joint1", "panda_finger_joint2"],
+        [0.04] * 2,
+    )
+
+    kin = JaxKinTree.from_urdf(urdf)
+    rest_pose = (kin.limits_upper + kin.limits_lower) / 2
+    coll = RobotColl.from_urdf(urdf)
+    # obj = Sphere.from_center_and_radius(jnp.zeros(3), jnp.array([0.015]))
+    obj = Capsule.from_radius_and_height(
+        jnp.array([0.02]), jnp.array([0.1]), jaxlie.SE3.identity()
+    )
+    grasps = AntipodalGrasps.from_sample_mesh(obj.to_trimesh(), 100)
+
+    server = viser.ViserServer()
+    urdf_vis = ViserUrdf(server, urdf)
+    obj_handle = server.scene.add_transform_controls("obj", scale=0.2)
+    server.scene.add_mesh_trimesh("obj/mesh", obj.to_trimesh())
+
+    target_name_handle = server.gui.add_dropdown(
+        "target joint",
+        list(urdf.joint_names),
+        initial_value=urdf.joint_names[0],
+    )
+    target_frame_handle = server.scene.add_frame("target", axes_length=0.1)
+
+    joints = rest_pose
+    while True:
+        target_joint_indices = jnp.array(
+            [
+                kin.joint_names.index(target_name_handle.value)
+            ]
+        )
+        target_poses = jaxlie.SE3(
+            jnp.array([*obj_handle.wxyz, *obj_handle.position])
+        )
+        T_grasps = grasps.to_se3()
+        T_grasps = jaxlie.SE3(jnp.concatenate([
+            T_grasps.wxyz_xyz,
+            (T_grasps @ jaxlie.SE3.from_rotation(jaxlie.SO3.from_z_radians(jnp.pi))).wxyz_xyz
+        ]))
+        target_poses = target_poses @ T_grasps
+
+        curr_sphere_obs = obj.transform(
+            jaxlie.SE3(
+                jnp.array([*obj_handle.wxyz, *obj_handle.position])
+            )
+        )
+
+        _, joints = solve_ik(
+            kin,
+            target_poses,
+            target_joint_indices,
+            joints,
+            robot_coll=coll,
+            world_coll_list=[curr_sphere_obs],
+            self_coll_weight=0.0,
+            world_coll_weight=1.0,
+            include_self_coll=False,
+            joint_vel_weight=1.0,
+            freeze_target_xyz_xyz=jnp.ones(6).at[4].set(0),
+        )
+
+        urdf_vis.update_cfg(onp.array(joints))

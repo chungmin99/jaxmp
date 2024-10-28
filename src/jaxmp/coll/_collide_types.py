@@ -183,8 +183,10 @@ class Capsule(CollGeom):
         return cap
 
     def _create_one_mesh(self, pos: jax.Array, mat: jax.Array, size: jax.Array):
+        # Trimesh capsule puts the hemisphere origins at 1) origin, and 2) height along z-axis.
+        segment = size[1].item()
         capsule = trimesh.creation.capsule(
-            radius=size[0].item(), height=size[1].item()
+            radius=size[0].item(), height=segment * 2
         )
         tf = onp.eye(4)
         tf[:3, :3] = mat
