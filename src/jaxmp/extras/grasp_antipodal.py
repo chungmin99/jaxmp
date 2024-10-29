@@ -5,6 +5,7 @@ Antipodal grasp sampling.
 from __future__ import annotations
 
 from typing import Literal, Optional, cast
+import jax
 import numpy as onp
 from jax import Array
 import jax.numpy as jnp
@@ -27,6 +28,7 @@ class AntipodalGrasps:
     @staticmethod
     def from_sample_mesh(
         mesh: trimesh.Trimesh,
+        prng_key: jax.Array,
         max_samples=100,
         max_width=float("inf"),
         max_angle_deviation=onp.pi / 4,
@@ -39,7 +41,7 @@ class AntipodalGrasps:
 
         sampled_points, sampled_face_indices = cast(
             tuple[onp.ndarray, onp.ndarray],
-            trimesh.sample.sample_surface(mesh, max_samples),
+            _sample_surface(mesh, max_samples, prng_key),
         )
         min_dot_product = onp.cos(max_angle_deviation)
 
@@ -145,3 +147,76 @@ class AntipodalGrasps:
         return jaxlie.SE3.from_rotation_and_translation(
             jaxlie.SO3.from_matrix(rotmat), self.centers
         )
+
+
+# Copied from `trimesh.sample.sample_surface`, but using jax PRNG.
+def _sample_surface(
+    mesh,
+    count: int,
+    prng_key: jax.Array,
+):
+    """
+    Sample the surface of a mesh, returning the specified
+    number of points
+
+    For individual triangle sampling uses this method:
+    http://mathworld.wolfram.com/TrianglePointPicking.html
+
+    Parameters
+    -----------
+    mesh : trimesh.Trimesh
+      Geometry to sample the surface of
+    count : int
+      Number of points to return
+    prng_key: jax.Array
+        PRNG key
+
+    Returns
+    ---------
+    samples : (count, 3) float
+      Points in space on the surface of mesh
+    face_index : (count,) int
+      Indices of faces for each sampled point
+    """
+
+    face_weight = mesh.area_faces
+
+    # cumulative sum of weights (len(mesh.faces))
+    weight_cum = jnp.cumsum(face_weight)
+
+    # seed the random number generator as requested
+    random_values = jax.random.uniform(prng_key, (count,))
+
+    # last value of cumulative sum is total summed weight/area
+    face_pick = random_values * weight_cum[-1]
+    # get the index of the selected faces
+    face_index = jnp.searchsorted(weight_cum, face_pick)
+
+    # pull triangles into the form of an origin + 2 vectors
+    tri_origins = mesh.vertices[mesh.faces[:, 0]]
+    tri_vectors = mesh.vertices[mesh.faces[:, 1:]].copy()
+    tri_vectors -= jnp.tile(tri_origins, (1, 2)).reshape((-1, 2, 3))
+
+    # pull the vectors for the faces we are going to sample from
+    tri_origins = tri_origins[face_index]
+    tri_vectors = tri_vectors[face_index]
+
+    # randomly generate two 0-1 scalar components to multiply edge vectors b
+    random_lengths = jax.random.uniform(prng_key, (len(tri_vectors), 2, 1))
+
+    # points will be distributed on a quadrilateral if we use 2 0-1 samples
+    # if the two scalar components sum less than 1.0 the point will be
+    # inside the triangle, so we find vectors longer than 1.0 and
+    # transform them to be inside the triangle
+    random_test = random_lengths.sum(axis=1).reshape(-1) > 1.0
+    random_lengths = random_lengths.at[random_test].set(random_lengths[random_test] - 1.0)
+    random_lengths = jnp.abs(random_lengths)
+
+    # multiply triangle edge vectors by the random lengths and sum
+    sample_vector = (tri_vectors * random_lengths).sum(axis=1)
+
+    # finally, offset by the origin to generate
+    # (n,3) points in space on the triangle
+    samples = sample_vector + tri_origins
+
+    return samples, face_index

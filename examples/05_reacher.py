@@ -1,7 +1,9 @@
 from pathlib import Path
 import time
+from jaxmp.coll._collide_types import Convex
 import viser
 from viser.extras import ViserUrdf
+import trimesh
 
 import numpy as onp
 import jax.numpy as jnp
@@ -182,7 +184,7 @@ def solve_ik(
                         robot_coll,
                         JointVar(0),
                         world_coll,
-                        jnp.array([0.005]),
+                        jnp.array([0.01]),
                         jnp.full(robot_coll.coll.get_batch_axes(), world_coll_weight),
                         ConstrainedSE3Var(0),
                     ),
@@ -223,16 +225,16 @@ if __name__ == "__main__":
     kin = JaxKinTree.from_urdf(urdf)
     rest_pose = (kin.limits_upper + kin.limits_lower) / 2
     coll = RobotColl.from_urdf(urdf)
-    # obj = Sphere.from_center_and_radius(jnp.zeros(3), jnp.array([0.015]))
-    obj = Capsule.from_radius_and_height(
-        jnp.array([0.02]), jnp.array([0.1]), jaxlie.SE3.identity()
-    )
-    grasps = AntipodalGrasps.from_sample_mesh(obj.to_trimesh(), 100)
+    
+    obj_mesh = trimesh.load(Path(__file__).parent / "assets/ycb_cracker_box.obj")
+    assert isinstance(obj_mesh, trimesh.Trimesh)
+    obj = Convex.from_mesh(obj_mesh)
+    grasps = AntipodalGrasps.from_sample_mesh(obj.to_trimesh(), 10000, max_width=0.08)
 
     server = viser.ViserServer()
     urdf_vis = ViserUrdf(server, urdf)
     obj_handle = server.scene.add_transform_controls("obj", scale=0.2)
-    server.scene.add_mesh_trimesh("obj/mesh", obj.to_trimesh())
+    server.scene.add_mesh_trimesh("obj/mesh", obj_mesh)
 
     target_name_handle = server.gui.add_dropdown(
         "target joint",
@@ -274,7 +276,7 @@ if __name__ == "__main__":
             self_coll_weight=0.0,
             world_coll_weight=1.0,
             include_self_coll=False,
-            joint_vel_weight=1.0,
+            # joint_vel_weight=1.0,
             freeze_target_xyz_xyz=jnp.ones(6).at[4].set(0),
         )
 
