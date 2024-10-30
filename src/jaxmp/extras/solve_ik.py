@@ -18,20 +18,18 @@ def solve_ik(
     target_joint_indices: jax.Array,
     initial_pose: jnp.ndarray,
     JointVar: jdc.Static[type[jaxls.Var[jax.Array]]],
-    ConstrainedSE3Var: jdc.Static[type[jaxls.Var[jaxlie.SE3]]],
+    ik_weight: jnp.ndarray,
     *,
     joint_var_idx: int = 0,
-    pose_var_idx: int = 0,
-    ik_weight: jax.Array = field(
-        default_factory=lambda: jnp.array([5.0] * 3 + [1.0] * 3)  # pos, rot
-    ),
     rest_weight: float = 0.01,
     limit_weight: float = 100.0,
     joint_vel_weight: float = 0.0,
+    dt: float = 0.01,
     solver_type: jdc.Static[
         Literal["cholmod", "conjugate_gradient", "dense_cholesky"]
     ] = "conjugate_gradient",
-    dt: float = 0.01,
+    ConstrainedSE3Var: jdc.Static[type[jaxls.Var[jaxlie.SE3]] | None] = None,
+    pose_var_idx: int = 0,
     max_iterations: int = 50,
 ) -> tuple[jaxlie.SE3, jnp.ndarray]:
     """
@@ -96,11 +94,13 @@ def solve_ik(
         ),
     )
 
-    joint_vars = [JointVar(joint_var_idx), ConstrainedSE3Var(pose_var_idx)]
-    joint_var_values = [
-        JointVar(joint_var_idx).with_value(initial_pose),
-        ConstrainedSE3Var(pose_var_idx)
+    joint_vars: list[jaxls.Var] = [JointVar(joint_var_idx)]
+    joint_var_values: list[jaxls.Var | jaxls._variables.VarWithValue] = [
+        JointVar(joint_var_idx).with_value(initial_pose)
     ]
+    if ConstrainedSE3Var is not None and pose_var_idx is not None:
+        joint_vars.append(ConstrainedSE3Var(pose_var_idx))
+        joint_var_values.append(ConstrainedSE3Var(pose_var_idx))
 
     graph = jaxls.FactorGraph.make(
         factors,
@@ -119,7 +119,10 @@ def solve_ik(
         verbose=False,
     )
 
-    # Update visualization.
-    base_pose = solution[ConstrainedSE3Var(0)]
+    if ConstrainedSE3Var is not None:
+        base_pose = solution[ConstrainedSE3Var(0)]
+    else:
+        base_pose = jaxlie.SE3.identity()
+
     joints = solution[JointVar(0)]
     return base_pose, joints

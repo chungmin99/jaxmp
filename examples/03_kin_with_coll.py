@@ -24,8 +24,16 @@ from jaxmp import JaxKinTree, RobotFactors
 from jaxmp.coll import Plane, RobotColl, Sphere, CollGeom
 from jaxmp.extras.urdf_loader import load_urdf
 
+# on gpu: 86something ms
+# set device to cpu --> 1.5 second per
+# jax.config.update("jax_platform_name", "cpu")
+
+# on cpu it's like 92?
+# on GPU it's like 172
+# oh....
+
 # set device to CPU... :'( it's still faster on CPU for single problem (e.g., this demonstration script).
-jax.config.update("jax_platform_name", "cpu")
+# jax.config.update("jax_platform_name", "cpu")
 
 
 def main(
