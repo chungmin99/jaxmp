@@ -50,7 +50,7 @@ def ik_cost(
     ).log()
     weights = jnp.broadcast_to(weights, residual.shape)
     assert residual.shape == weights.shape
-    residual = (residual * weights)
+    # residual = (0.1 * residual * weights) / (joint_cfg.shape[0])
     residual = residual[jnp.argmin(jnp.abs(residual).sum(axis=-1))]
     return residual.flatten()
 
@@ -226,15 +226,21 @@ if __name__ == "__main__":
     rest_pose = (kin.limits_upper + kin.limits_lower) / 2
     coll = RobotColl.from_urdf(urdf)
     
+    # obj_mesh = trimesh.load(Path(__file__).parent / "assets/ycb_power_drill.obj")
     obj_mesh = trimesh.load(Path(__file__).parent / "assets/ycb_cracker_box.obj")
     assert isinstance(obj_mesh, trimesh.Trimesh)
     obj = Convex.from_mesh(obj_mesh)
-    grasps = AntipodalGrasps.from_sample_mesh(obj.to_trimesh(), 10000, max_width=0.08)
+    
+    prng_key = jax.random.PRNGKey(0)
+    grasps = AntipodalGrasps.from_sample_mesh(
+        obj.to_trimesh(), prng_key=prng_key, max_samples=1000, max_width=0.08, max_angle_deviation=jnp.pi/8
+    )
 
     server = viser.ViserServer()
     urdf_vis = ViserUrdf(server, urdf)
-    obj_handle = server.scene.add_transform_controls("obj", scale=0.2)
+    obj_handle = server.scene.add_transform_controls("obj", scale=0.3)
     server.scene.add_mesh_trimesh("obj/mesh", obj_mesh)
+    server.scene.add_mesh_trimesh("obj/grasps", grasps.to_trimesh())
 
     target_name_handle = server.gui.add_dropdown(
         "target joint",
@@ -253,10 +259,9 @@ if __name__ == "__main__":
         target_poses = jaxlie.SE3(
             jnp.array([*obj_handle.wxyz, *obj_handle.position])
         )
-        T_grasps = grasps.to_se3()
         T_grasps = jaxlie.SE3(jnp.concatenate([
-            T_grasps.wxyz_xyz,
-            (T_grasps @ jaxlie.SE3.from_rotation(jaxlie.SO3.from_z_radians(jnp.pi))).wxyz_xyz
+            grasps.to_se3(along_axis='y').wxyz_xyz,
+            grasps.to_se3(along_axis='y', flip_axis=True).wxyz_xyz,
         ]))
         target_poses = target_poses @ T_grasps
 
@@ -270,13 +275,13 @@ if __name__ == "__main__":
             kin,
             target_poses,
             target_joint_indices,
-            joints,
+            rest_pose,
             robot_coll=coll,
             world_coll_list=[curr_sphere_obs],
+            pos_weight=10,
             self_coll_weight=0.0,
-            world_coll_weight=1.0,
+            world_coll_weight=10.0,
             include_self_coll=False,
-            # joint_vel_weight=1.0,
             freeze_target_xyz_xyz=jnp.ones(6).at[4].set(0),
         )
 
