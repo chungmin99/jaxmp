@@ -1,4 +1,5 @@
-from typing import Literal, Optional
+from dataclasses import field
+from typing import Literal
 
 import jax
 import jax.numpy as jnp
@@ -8,7 +9,6 @@ import jax_dataclasses as jdc
 
 from jaxmp.robot_factors import RobotFactors
 from jaxmp.kinematics import JaxKinTree
-from jaxmp.coll import RobotColl, CollGeom
 
 
 @jdc.jit
@@ -16,127 +16,91 @@ def solve_ik(
     kin: JaxKinTree,
     target_pose: jaxlie.SE3,
     target_joint_indices: jax.Array,
-    rest_pose: jnp.ndarray,
+    initial_pose: jnp.ndarray,
+    JointVar: jdc.Static[type[jaxls.Var[jax.Array]]],
+    ConstrainedSE3Var: jdc.Static[type[jaxls.Var[jaxlie.SE3]]],
     *,
-    pos_weight: float = 5.0,
-    rot_weight: float = 1.0,
+    joint_var_idx: int = 0,
+    pose_var_idx: int = 0,
+    ik_weight: jax.Array = field(
+        default_factory=lambda: jnp.array([5.0] * 3 + [1.0] * 3)  # pos, rot
+    ),
     rest_weight: float = 0.01,
     limit_weight: float = 100.0,
-    manipulability_weight: float = 0.0,
-    include_manipulability: jdc.Static[bool] = False,
     joint_vel_weight: float = 0.0,
-    self_coll_weight: float = 2.0,
-    world_coll_weight: float = 10.0,
-    robot_coll: Optional[RobotColl] = None,
-    world_coll_list: list[CollGeom] = [],
-    solver_type: jdc.Static[Literal[
-        "cholmod", "conjugate_gradient", "dense_cholesky"
-    ]] = "conjugate_gradient",
-    freeze_target_xyz_xyz: Optional[jnp.ndarray] = None,
-    freeze_base_xyz_xyz: Optional[jnp.ndarray] = None,
+    solver_type: jdc.Static[
+        Literal["cholmod", "conjugate_gradient", "dense_cholesky"]
+    ] = "conjugate_gradient",
     dt: float = 0.01,
+    max_iterations: int = 50,
 ) -> tuple[jaxlie.SE3, jnp.ndarray]:
     """
     Solve IK for the robot.
     Args:
         target_pose: Desired pose of the target joint, SE3 has batch axes (n_target,).
         target_joint_indices: Indices of the target joints, length n_target.
-        freeze_target_xyz_xyz: 6D vector indicating which axes to freeze in the target frame.
-        freeze_base_xyz_xyz: 6D vector indicating which axes to freeze in the base frame.
+        initial_pose: Initial pose of the joints, used for joint velocity cost factor.
+        JointVar: Joint variable type.
+        ConstrainedSE3Var: Constrained SE3 variable type.
+        joint_var_idx: Index for the joint variable.
+        pose_var_idx: Index for the pose variable.
+        ik_weight: Weight for the IK cost factor.
+        rest_weight: Weight for the rest cost factor.
+        limit_weight: Weight for the joint limit cost factor.
+        joint_vel_weight: Weight for the joint velocity cost factor.
+        solver_type: Type of solver to use.
+        dt: Time step for the velocity cost factor.
+        max_iterations: Maximum number of iterations for the solver.
     Returns:
         Base pose (jaxlie.SE3)
         Joint angles (jnp.ndarray)
     """
-    if freeze_target_xyz_xyz is None:
-        freeze_target_xyz_xyz = jnp.ones(6)
-    if freeze_base_xyz_xyz is None:
-        freeze_base_xyz_xyz = jnp.ones(6)
-
-    JointVar = RobotFactors.get_var_class(kin, default_val=rest_pose)
-    ConstrainedSE3Var = RobotFactors.get_constrained_se3(freeze_base_xyz_xyz)
-
-    joint_vars = [JointVar(0), ConstrainedSE3Var(0)]
+    # NOTE You can't add new factors on-the-fly with JIT, because:
+    # - we'd want to pass in lists of jaxls.Factor objects
+    # - but lists / tuples are static
+    # - and ArrayImpl is not a valid type for a static argument.
+    # (and you can't stack different Factor definitions, since it's a part of the treedef.)
 
     factors: list[jaxls.Factor] = [
-        jaxls.Factor(
-            RobotFactors.limit_cost,
-            (
-                kin,
-                JointVar(0),
-                jnp.array([limit_weight] * kin.num_actuated_joints),
-            ),
+        RobotFactors.limit_cost_factor(
+            JointVar,
+            joint_var_idx,
+            kin,
+            jnp.array([limit_weight] * kin.num_actuated_joints),
         ),
-        jaxls.Factor(
-            RobotFactors.joint_limit_vel_cost,
-            (
-                kin,
-                JointVar(0),
-                rest_pose,
-                dt,
-                jnp.array([joint_vel_weight] * kin.num_actuated_joints),
-            ),
+        RobotFactors.limit_vel_cost_factor(
+            JointVar,
+            joint_var_idx,
+            kin,
+            dt,
+            jnp.array([joint_vel_weight] * kin.num_actuated_joints),
+            prev_cfg=initial_pose,
         ),
-        jaxls.Factor(
-            RobotFactors.rest_cost,
-            (
-                JointVar(0),
-                jnp.array([rest_weight] * kin.num_actuated_joints),
-            ),
+        RobotFactors.rest_cost_factor(
+            JointVar,
+            joint_var_idx,
+            jnp.array([rest_weight] * kin.num_actuated_joints),
         ),
     ]
 
-    ik_weights = jnp.array([pos_weight] * 3 + [rot_weight] * 3)
-    ik_weights = ik_weights * freeze_target_xyz_xyz
     factors.append(
-        jaxls.Factor(
-            RobotFactors.ik_cost,
-            (
-                kin,
-                joint_vars[0],
-                target_pose,
-                target_joint_indices,
-                ik_weights,
-                ConstrainedSE3Var(0),
-            ),
+        RobotFactors.ik_cost_factor(
+            JointVar,
+            joint_var_idx,
+            kin,
+            target_pose,
+            target_joint_indices,
+            ik_weight,
+            BaseConstrainedSE3VarType=ConstrainedSE3Var,
+            base_se3_var_idx=pose_var_idx,
         ),
     )
-    
-    if include_manipulability:
-        for idx, target_joint_idx in enumerate(target_joint_indices):
-            factors.append(
-                jaxls.Factor(
-                    RobotFactors.manipulability_cost,
-                    (
-                        kin,
-                        joint_vars[0],
-                        target_joint_idx,
-                        jnp.array([manipulability_weight] * kin.num_actuated_joints),
-                    ),
-                )
-            )
 
-    if robot_coll is not None:
-        factors.extend(
-            RobotFactors.get_self_coll_factors(
-                kin,
-                robot_coll,
-                JointVar(0),
-                0.01,
-                self_coll_weight,
-            )
-        )
-        for world_coll in world_coll_list:
-            factors.extend(
-                RobotFactors.get_world_coll_factors(
-                        kin,
-                        robot_coll,
-                        JointVar(0),
-                        world_coll,
-                        0.1,
-                        world_coll_weight,
-                        ConstrainedSE3Var(0),
-                )
-            )
+    joint_vars = [JointVar(joint_var_idx), ConstrainedSE3Var(pose_var_idx)]
+    joint_var_values = [
+        JointVar(joint_var_idx).with_value(initial_pose),
+        ConstrainedSE3Var(pose_var_idx)
+    ]
 
     graph = jaxls.FactorGraph.make(
         factors,
@@ -145,12 +109,12 @@ def solve_ik(
     )
     solution = graph.solve(
         linear_solver=solver_type,
-        initial_vals=jaxls.VarValues.make(joint_vars),
-        trust_region=jaxls.TrustRegionConfig(lambda_initial=1.0),
+        initial_vals=jaxls.VarValues.make(joint_var_values),
+        trust_region=jaxls.TrustRegionConfig(),
         termination=jaxls.TerminationConfig(
             gradient_tolerance=1e-5,
             parameter_tolerance=1e-5,
-            max_iterations=40,
+            max_iterations=max_iterations,
         ),
         verbose=False,
     )

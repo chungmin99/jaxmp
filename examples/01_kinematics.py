@@ -54,6 +54,7 @@ def main(
 
     kin = JaxKinTree.from_urdf(urdf)
     rest_pose = (kin.limits_upper + kin.limits_lower) / 2
+    JointVar = RobotFactors.get_var_class(kin, rest_pose)
 
     server = viser.ViserServer()
 
@@ -63,46 +64,37 @@ def main(
     server.scene.add_grid("ground", width=2, height=2, cell_size=0.1)
 
     # Add base-frame freezing logic.
-    with server.gui.add_folder("Base frame"):
-        freeze_base_x = server.gui.add_checkbox("Freeze x", initial_value=True)
-        freeze_base_y = server.gui.add_checkbox("Freeze y", initial_value=True)
-        freeze_base_z = server.gui.add_checkbox("Freeze z", initial_value=True)
-        freeze_base_rx = server.gui.add_checkbox("Freeze rx", initial_value=True)
-        freeze_base_ry = server.gui.add_checkbox("Freeze ry", initial_value=True)
-        freeze_base_rz = server.gui.add_checkbox("Freeze rz", initial_value=True)
+    T_base_world_handles = []
+    with server.gui.add_folder("T_base_world"):
+        for dof in ["x", "y", "z", "rx", "ry", "rz"]:
+            T_base_world_handles.append(
+                server.gui.add_checkbox(f"Freeze {dof}", initial_value=True)
+            )
 
     def get_freeze_base_xyz_xyz() -> jnp.ndarray:
-        return jnp.array(
-            [
-                freeze_base_x.value,
-                freeze_base_y.value,
-                freeze_base_z.value,
-                freeze_base_rx.value,
-                freeze_base_ry.value,
-                freeze_base_rz.value,
-            ]
-        ).astype(jnp.float32)
+        return jnp.array([handle.value for handle in T_base_world_handles]).astype(
+            jnp.float32
+        )
 
     # Add base-frame freezing logic.
-    with server.gui.add_folder("Target frame"):
-        freeze_target_x = server.gui.add_checkbox("Freeze x", initial_value=True)
-        freeze_target_y = server.gui.add_checkbox("Freeze y", initial_value=True)
-        freeze_target_z = server.gui.add_checkbox("Freeze z", initial_value=True)
-        freeze_target_rx = server.gui.add_checkbox("Freeze rx", initial_value=True)
-        freeze_target_ry = server.gui.add_checkbox("Freeze ry", initial_value=True)
-        freeze_target_rz = server.gui.add_checkbox("Freeze rz", initial_value=True)
+    dof_target_handles = []
+    with server.gui.add_folder("Target pose DoF"):
+        for dof in ["x", "y", "z", "rx", "ry", "rz"]:
+            dof_target_handles.append(
+                server.gui.add_checkbox(f"Freeze {dof}", initial_value=True)
+            )
 
     def get_freeze_target_xyz_xyz() -> jnp.ndarray:
-        return jnp.array(
-            [
-                freeze_target_x.value,
-                freeze_target_y.value,
-                freeze_target_z.value,
-                freeze_target_rx.value,
-                freeze_target_ry.value,
-                freeze_target_rz.value,
-            ]
-        ).astype(jnp.float32)
+        return jnp.array([handle.value for handle in dof_target_handles]).astype(
+            jnp.float32
+        )
+
+    ConstrainedSE3Var = RobotFactors.get_constrained_se3(get_freeze_base_xyz_xyz())
+    def update_constrained_se3_var():
+        nonlocal ConstrainedSE3Var
+        ConstrainedSE3Var = RobotFactors.get_constrained_se3(get_freeze_base_xyz_xyz())
+    for handle in T_base_world_handles:
+        handle.on_update(lambda _: update_constrained_se3_var())
 
     # Add GUI elements.
     timing_handle = server.gui.add_number("Time (ms)", 0.01, disabled=True)
@@ -120,17 +112,7 @@ def main(
         initial_value="conjugate_gradient",
     )
 
-    smooth_handle = server.gui.add_checkbox(
-        "Smooth", initial_value=False
-    )
-
-    with server.gui.add_folder("Manipulability"):
-        manipulabiltiy_weight_handler = server.gui.add_slider(
-            "weight", 0.0, 0.01, 0.001, 0.00
-        )
-        manipulability_cost_handler = server.gui.add_number(
-            "Yoshikawa index", 0.001, disabled=True
-        )
+    smooth_handle = server.gui.add_checkbox("Smooth", initial_value=False)
 
     set_frames_to_current_pose = server.gui.add_button("Set frames to current pose")
     add_joint_button = server.gui.add_button("Add joint!")
@@ -210,10 +192,12 @@ def main(
             time.sleep(0.1)
             continue
 
-        target_joint_indices = jnp.array([
-            kin.joint_names.index(target_name_handle.value)
-            for target_name_handle in target_name_handles
-        ])
+        target_joint_indices = jnp.array(
+            [
+                kin.joint_names.index(target_name_handle.value)
+                for target_name_handle in target_name_handles
+            ]
+        )
         target_pose_list = [
             jaxlie.SE3(jnp.array([*target_tf_handle.wxyz, *target_tf_handle.position]))
             for target_tf_handle in target_tf_handles
@@ -221,14 +205,16 @@ def main(
         target_poses = jaxlie.SE3(
             jnp.stack([pose.wxyz_xyz for pose in target_pose_list])
         )
-        manipulability_weight = manipulabiltiy_weight_handler.value
-        
+
         if smooth_handle.value:
             initial_pose = joints
             joint_vel_weight = limit_weight
         else:
             initial_pose = rest_pose
             joint_vel_weight = 0.0
+
+        ik_weight = jnp.array([pos_weight]*3 + [rot_weight]*3)
+        ik_weight = ik_weight * get_freeze_target_xyz_xyz()
 
         # Solve!
         start_time = time.time()
@@ -237,16 +223,13 @@ def main(
             target_poses,
             target_joint_indices,
             initial_pose,
-            pos_weight=pos_weight,
-            rot_weight=rot_weight,
+            JointVar,
+            ConstrainedSE3Var,
+            ik_weight=ik_weight,
             rest_weight=rest_weight,
             limit_weight=limit_weight,
-            manipulability_weight=manipulability_weight,
-            include_manipulability=(manipulability_weight > 0),
             joint_vel_weight=joint_vel_weight,
             solver_type=solver_type_handle.value,
-            freeze_base_xyz_xyz=get_freeze_target_xyz_xyz(),
-            freeze_target_xyz_xyz=get_freeze_base_xyz_xyz(),
         )
 
         # Ensure all computations are complete before measuring time
@@ -268,13 +251,6 @@ def main(
             )
             target_frame_handle.position = onp.array(T_target_world.translation())
             target_frame_handle.wxyz = onp.array(T_target_world.rotation().wxyz)
-
-        # Update manipulability cost.
-        manip_cost = 0
-        for target_joint_idx in target_joint_indices:
-            manip_cost += RobotFactors.manip_yoshikawa(kin, joints, target_joint_idx)
-        manip_cost /= len(target_joint_indices)
-        manipulability_cost_handler.value = onp.array(manip_cost).item()
 
 
 if __name__ == "__main__":
