@@ -23,7 +23,9 @@ import viser.extras
 from jaxmp import JaxKinTree, RobotFactors
 from jaxmp.coll import Plane, RobotColl, Sphere, CollGeom
 from jaxmp.extras.urdf_loader import load_urdf
-from jaxmp.extras.solve_ik import solve_ik
+
+# set device to CPU... :'( it's still faster on CPU for single problem (e.g., this demonstration script).
+jax.config.update("jax_platform_name", "cpu")
 
 
 def main(
@@ -194,8 +196,8 @@ def solve_ik_with_coll(
     rot_weight: float = 1.0,
     rest_weight: float = 0.01,
     limit_weight: float = 100.0,
-    self_coll_weight: float = 1.0,
-    world_coll_weight: float = 5.0,
+    self_coll_weight: float = 5.0,
+    world_coll_weight: float = 10.0,
 ) -> jnp.ndarray:
     # Create factor graph.
     factors: list[jaxls.Factor] = []
@@ -238,7 +240,7 @@ def solve_ik_with_coll(
 
     # Add collision factors.
     self_coll_factors = RobotFactors.self_coll_factors(
-        JointVar, joint_var_idx, kin, robot_coll, 0.01, self_coll_weight
+        JointVar, joint_var_idx, kin, robot_coll, 0.05, self_coll_weight
     )
     world_coll_factors = [
         RobotFactors.get_world_coll_factors(

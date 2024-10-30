@@ -58,8 +58,7 @@ class CollGeom(abc.ABC):
 
     def slice(self, *index):
         with jdc.copy_and_mutate(self, validate=False) as _self:
-            _self.pos = self.pos[*index, :]
-            _self.mat = self.mat[*index, :, :]
+            _self.pose = jaxlie.SE3(_self.pose.wxyz_xyz[*index, :])
             _self.size = self.size[*index, :]
         return _self
 
