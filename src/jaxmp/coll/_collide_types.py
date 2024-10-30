@@ -25,33 +25,35 @@ from mujoco.mjx._src.mesh import _get_face_norm, _get_edge_normals
 
 @jdc.pytree_dataclass
 class CollGeom(abc.ABC):
-    pos: Float[jax.Array, "*batch 3"]  # Translation.
-    mat: Float[jax.Array, "*batch 3 3"]  # SO3.
+    pose: Float[jaxlie.SE3, "*batch 7"]  # SE3.
     size: Float[jax.Array, "*batch 3"]  # Object shape (e.g., radii, height).
 
+    @property
+    def pos(self):
+        return self.pose.translation()
+
+    @property
+    def mat(self):
+        return self.pose.rotation().as_matrix()
+
     def get_batch_axes(self):
-        return self.pos.shape[:-1]
+        return self.pose.get_batch_axes()
 
     def broadcast_to(self, *shape):
         with jdc.copy_and_mutate(self, validate=False) as _self:
-            _self.pos = jnp.broadcast_to(self.pos, shape + (3,))
-            _self.mat = jnp.broadcast_to(self.mat, shape + (3, 3))
-            _self.size = jnp.broadcast_to(self.size, shape + (3,))
+            _self.pose = jaxlie.SE3(jnp.broadcast_to(_self.pose.wxyz_xyz, (*shape, 7)))
+            _self.size = jnp.broadcast_to(_self.size, shape + (3,))
         return _self
 
     def reshape(self, *shape):
         with jdc.copy_and_mutate(self, validate=False) as _self:
-            _self.pos = self.pos.reshape(shape + (3,))
-            _self.mat = self.mat.reshape(shape + (3, 3))
-            _self.size = self.size.reshape(shape + (3,))
+            _self.pose = jaxlie.SE3(_self.pose.wxyz_xyz.reshape(shape + (7,)))
+            _self.size = _self.size.reshape(shape + (3,))
         return _self
-    
+
     def transform(self, tf: jaxlie.SE3):
-        broadcast_axes = jnp.broadcast_shapes(self.get_batch_axes(), tf.get_batch_axes())
-        _self = self.broadcast_to(*broadcast_axes)
-        with jdc.copy_and_mutate(_self, validate=False) as _self:
-            _self.mat = (tf.rotation() @ jaxlie.SO3.from_matrix(_self.mat)).as_matrix()
-            _self.pos = tf.apply(_self.pos)
+        with jdc.copy_and_mutate(self, validate=False) as _self:
+            _self.pose = tf @ _self.pose
         return _self
 
     def slice(self, *index):
@@ -62,7 +64,7 @@ class CollGeom(abc.ABC):
         return _self
 
     def to_trimesh(self) -> trimesh.Trimesh:
-        _self = self.reshape(-1,)
+        _self = jax.tree.map(lambda x: x.reshape(-1, x.shape[-1]), self)
 
         meshes = [trimesh.Trimesh()]
         for i in range(_self.get_batch_axes()[0]):
@@ -93,7 +95,11 @@ class Plane(CollGeom):
         assert mat.shape[:-2] == batch_axes
 
         size = jnp.zeros(batch_axes + (3,))
-        return Plane(pos=point, mat=mat, size=size)
+        pose = jaxlie.SE3.from_rotation_and_translation(
+            jaxlie.SO3.from_matrix(mat),  # SO3
+            point,
+        )
+        return Plane(pose=pose, size=size)
 
     @staticmethod
     def _normal_to_SO3(normal: jax.Array) -> jax.Array:
@@ -131,7 +137,11 @@ class Sphere(CollGeom):
 
         size = jnp.zeros(batch_axes + (2,))
         size = jnp.concatenate([radius, size], axis=-1)
-        return Sphere(pos=center, mat=mat, size=size)
+        pose = jaxlie.SE3.from_rotation_and_translation(
+            jaxlie.SO3.from_matrix(mat),  # SO3
+            center,
+        )
+        return Sphere(pose=pose, size=size)
 
     def _create_one_mesh(self, pos: jax.Array, mat: jax.Array, size: jax.Array):
         sphere = trimesh.creation.icosphere(radius=size[0].item())
@@ -148,20 +158,13 @@ class Capsule(CollGeom):
         radius: jax.Array, height: jax.Array, transform: jaxlie.SE3
     ) -> Capsule:
         batch_axes = transform.get_batch_axes()
-        center = transform.translation()
-        mat = transform.rotation().as_matrix()
 
-        mat = jaxlie.SO3.identity(batch_axes).as_matrix()
-
-        # Uses capsule.size[0] as the radius and capsule.size[1] as the height.
-        assert radius.shape == batch_axes + (1,)
-        assert height.shape == batch_axes + (1,)
-
-        # `plane_capsule` uses offsets (in [segment, -segment]).
+        # Uses cylinder.size[0] as the radius and cylinder.size[1] as the height.
         segment = height / 2
-
         shape = jnp.concatenate([radius, segment, jnp.zeros_like(radius)], axis=-1)
-        return Capsule(pos=center, mat=mat, size=shape)
+        shape = jnp.broadcast_to(shape, batch_axes + (3,))
+
+        return Capsule(pose=transform, size=shape)
 
     @staticmethod
     def from_min_cylinder(mesh: trimesh.Trimesh) -> Capsule:
@@ -191,7 +194,7 @@ class Capsule(CollGeom):
 
     def _create_one_mesh(self, pos: jax.Array, mat: jax.Array, size: jax.Array):
         capsule = trimesh.creation.capsule(
-            radius=size[0].item(), height=size[1].item()
+            radius=size[0].item(), height=size[1].item() * 2
         )
         tf = onp.eye(4)
         tf[:3, :3] = mat
@@ -211,8 +214,12 @@ class Ellipsoid(CollGeom):
 
         # Uses ellipsoid.size as the radii.
         assert abc.shape == batch_axes + (3,)
-        return Ellipsoid(pos=center, mat=mat, size=abc)
-    
+        pose = jaxlie.SE3.from_rotation_and_translation(
+            jaxlie.SO3.from_matrix(mat),  # SO3
+            center,
+        )
+        return Ellipsoid(pose=pose, size=abc)
+
     def _create_one_mesh(self, pos: jax.Array, mat: jax.Array, size: jax.Array):
         ellipsoid = trimesh.creation.icosphere(radius=size[0].item())
         ellipsoid.apply_scale(size)
@@ -220,7 +227,7 @@ class Ellipsoid(CollGeom):
         tf[:3, 3] = pos
         ellipsoid.vertices = trimesh.transform_points(ellipsoid.vertices, tf)
         return ellipsoid
-    
+
 
 @jdc.pytree_dataclass
 class Cylinder(CollGeom):
@@ -229,22 +236,16 @@ class Cylinder(CollGeom):
         radius: jax.Array, height: jax.Array, transform: jaxlie.SE3
     ) -> Cylinder:
         batch_axes = transform.get_batch_axes()
-        center = transform.translation()
-        mat = transform.rotation().as_matrix()
-
-        mat = jaxlie.SO3.identity(batch_axes).as_matrix()
 
         # Uses cylinder.size[0] as the radius and cylinder.size[1] as the height.
-        assert radius.shape == batch_axes + (1,)
-        assert height.shape == batch_axes + (1,)
+        segment = height / 2
+        shape = jnp.concatenate([radius, segment, jnp.zeros_like(radius)], axis=-1)
+        shape = jnp.broadcast_to(shape, batch_axes + (3,))
 
-        shape = jnp.concatenate([radius, height, jnp.zeros_like(radius)], axis=-1)
-        return Cylinder(pos=center, mat=mat, size=shape)
-    
+        return Cylinder(pose=transform, size=shape)
+
     @staticmethod
-    def from_min_cylinder(
-        mesh: trimesh.Trimesh, batch_axes: tuple[int, ...] = ()
-    ) -> Cylinder:
+    def from_min_cylinder(mesh: trimesh.Trimesh) -> Cylinder:
         """
         Approximate a minimum bounding cylinder for a mesh.
         """
@@ -270,7 +271,7 @@ class Cylinder(CollGeom):
 
     def _create_one_mesh(self, pos: jax.Array, mat: jax.Array, size: jax.Array):
         cylinder = trimesh.creation.cylinder(
-            radius=size[0].item(), height=size[1].item()
+            radius=size[0].item(), height=size[1].item() * 2
         )
         tf = onp.eye(4)
         tf[:3, :3] = mat
@@ -282,8 +283,8 @@ class Cylinder(CollGeom):
 @jdc.pytree_dataclass
 class Convex(CollGeom):
     # Experimental. May be slightly buggy.
-    mesh_info: ConvexMesh
-    offset_to_origin: Float[jax.Array, "*batch 3"]
+    mesh_info: jdc.Static[ConvexMesh]
+    offset_to_origin: jdc.Static[Float[jax.Array, "*batch 3"]]
 
     @staticmethod
     def from_mesh(
@@ -296,7 +297,7 @@ class Convex(CollGeom):
         """
         # Make the meshes convex.
         mesh = mesh.convex_hull
-        
+
         # TODO Check why we must ensure that the mesh includes the origin.
         # Found that this is necessary for convex collisions to work!
         offset_to_origin = mesh.centroid
@@ -313,19 +314,18 @@ class Convex(CollGeom):
         size = jnp.zeros(batch_axes + (3,))
 
         return Convex(
-            pos=tf.translation(),
-            mat=tf.rotation().as_matrix(),
+            pose=tf,
             size=size,  # unused.
             mesh_info=mesh_info,
             offset_to_origin=offset_to_origin,
         )
-    
+
     def _create_one_mesh(self, pos: jax.Array, mat: jax.Array, size: jax.Array):
         mesh = cast(
             trimesh.Trimesh,
             trimesh.PointCloud(
                 self.mesh_info.vert,
-            ).convex_hull
+            ).convex_hull,
         )
         mesh.fix_normals()
         mesh.vertices += self.offset_to_origin
@@ -335,7 +335,7 @@ class Convex(CollGeom):
         tf[:3, 3] = pos
         mesh.apply_transform(tf)
         return mesh
-    
+
     @staticmethod
     def decimate(mesh: trimesh.Trimesh, n_verts: int) -> trimesh.Trimesh:
         """
@@ -356,7 +356,7 @@ class Convex(CollGeom):
         _mesh = trimesh.Trimesh(vertices=hull_verts, faces=hull_faces)
         _mesh.fix_normals()
         return _mesh
-    
+
     @staticmethod
     def _get_mesh_mjx(mesh) -> ConvexMesh:
         # Based on https://github.com/google-deepmind/mujoco/blob/43a7493d1739d5cb1618de6863f929d99c7a8822/mjx/mujoco/mjx/_src/mesh.py#L280.

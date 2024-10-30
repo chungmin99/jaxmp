@@ -12,7 +12,7 @@ import jaxlie
 import viser
 import viser.extras
 
-from jaxmp.coll import collide, Capsule, Sphere, Plane, Convex
+from jaxmp.coll import collide, Capsule, Sphere, Plane, Convex, Cylinder
 
 
 def main():
@@ -30,6 +30,9 @@ def main():
         ).reshape(-1, 1),
         Sphere.from_center_and_radius(jnp.array([0.0, 0.0, 0.0]), jnp.array([0.1])),
         Capsule.from_radius_and_height(
+            jnp.array([0.1]), jnp.array([0.2]), jaxlie.SE3.identity()
+        ),
+        Cylinder.from_radius_and_height(
             jnp.array([0.1]), jnp.array([0.2]), jaxlie.SE3.identity()
         ),
         convex_0.reshape(1, -1),
@@ -52,7 +55,10 @@ def main():
 
         for i in range(len(coll_list)):
             for j in range(i + 1, len(coll_list)):
-                collision = collide(_coll_list[i], _coll_list[j])
+                try:
+                    collision = collide(_coll_list[i], _coll_list[j])
+                except NotImplementedError:
+                    continue
 
                 assert not jnp.any(collision.dist == jnp.inf)
                 expected_shape = jnp.broadcast_shapes(
