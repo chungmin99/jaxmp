@@ -19,7 +19,7 @@ import viser
 import viser.extras
 
 from jaxmp import JaxKinTree
-from jaxmp.coll import Plane, RobotColl, Sphere
+from jaxmp.coll import Plane, RobotColl, Sphere, CollGeom
 from jaxmp.extras.urdf_loader import load_urdf
 from jaxmp.extras.solve_ik import solve_ik
 
@@ -106,6 +106,7 @@ def main(
     has_jitted = False
     while True:
         if visualize_coll.value:
+            assert isinstance(robot_coll.coll, CollGeom)
             collbody_handle = server.scene.add_mesh_trimesh(
                 "coll",
                 robot_coll.coll.transform(
@@ -180,6 +181,7 @@ def main(
 
         urdf_vis.update_cfg(onp.array(joints))
 
+        assert isinstance(robot_coll.coll, CollGeom)
         coll = robot_coll.coll.transform(
             jaxlie.SE3(
                 kin.forward_kinematics(joints)[..., robot_coll.link_joint_idx, :]

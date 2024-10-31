@@ -194,7 +194,6 @@ def main(
         rest_pose=rest_pose,
         freeze_target_xyz_xyz=freeze_target_xyz_xyz
     )
-    traj = onp.array(traj)
 
     with server.gui.add_folder("Target frame"):
         freeze_target_x = server.gui.add_checkbox("Freeze x", initial_value=True)
@@ -233,7 +232,7 @@ def main(
                 target_pose.wxyz_xyz[..., 4:] - traj_center
             )
         )
-        traj_jnp = solve_traj_gomp(
+        traj = solve_traj_gomp(
             kin,
             target_pose,
             target_joint_indices,
@@ -245,7 +244,6 @@ def main(
             rest_pose=rest_pose,
             freeze_target_xyz_xyz=freeze_target_xyz_xyz
         )
-        traj = onp.array(traj_jnp)
         update_traj_handle.disabled = False
 
     # Visualize!
@@ -254,7 +252,7 @@ def main(
     )
     @slider.on_update
     def _(_) -> None:
-        urdf_orig.update_cfg(traj[slider.value])
+        urdf_orig.update_cfg(onp.array(traj[slider.value]))
 
         Ts_world_joint = onp.array(kin.forward_kinematics(traj[slider.value]))
         for idx, joint_name in zip(target_joint_indices, trajectory.keys()):
