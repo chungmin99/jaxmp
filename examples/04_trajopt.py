@@ -92,32 +92,26 @@ def solve_traj_gomp(
             )
         factors.extend(
             [
-                jaxls.Factor(
-                    RobotFactors.limit_cost,
-                    (
-                        kin,
-                        JointVar(tstep),
-                        jnp.array([limit_weight] * kin.num_actuated_joints),
-                    ),
+                RobotFactors.limit_cost_factor(
+                    JointVar,
+                    tstep,
+                    kin,
+                    jnp.array([limit_weight] * kin.num_actuated_joints),
                 ),
-                jaxls.Factor(
-                    RobotFactors.rest_cost,
-                    (
-                        JointVar(tstep),
-                        jnp.array([rest_weight] * kin.num_actuated_joints),
-                    ),
+                RobotFactors.rest_cost_factor(
+                    JointVar,
+                    tstep,
+                    jnp.array([rest_weight] * kin.num_actuated_joints),
                 ),
             ]
         )
         if tstep > 0:
             factors.append(
-                jaxls.Factor(
-                    RobotFactors.smoothness_cost,
-                    (
-                        JointVar(tstep),
-                        JointVar(tstep - 1),
-                        jnp.array([smoothness_weight] * kin.num_actuated_joints),
-                    ),
+                RobotFactors.smoothness_cost_factor(
+                    JointVar,
+                    tstep,
+                    tstep - 1,
+                    jnp.array([smoothness_weight] * kin.num_actuated_joints),
                 )
             )
 

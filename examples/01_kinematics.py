@@ -139,15 +139,6 @@ def main(
     urdf_base_frame.wxyz = onp.array(base_pose.rotation().wxyz)
     urdf_vis.update_cfg(onp.array(joints))
 
-    # Manipulability weight.
-    with server.gui.add_folder("Manipulability"):
-        manipulabiltiy_weight_handler = server.gui.add_slider(
-            "weight", 0.0, 0.01, 0.001, 0.00
-        )
-        manipulability_cost_handler = server.gui.add_number(
-            "Yoshikawa index", 0.001, disabled=True
-        )
-
     # Add joints.
     def add_joint():
         idx = len(target_name_handles)

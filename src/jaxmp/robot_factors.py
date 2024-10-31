@@ -368,8 +368,8 @@ class RobotFactors:
     @staticmethod
     def smoothness_cost_factor(
         JointVarType: type[jaxls.Var[Array]],
-        var_idx_curr: jax.Array,
-        var_idx_past: jax.Array,
+        var_idx_curr: jax.Array | int,
+        var_idx_past: jax.Array | int,
         weights: Array,
     ) -> jaxls.Factor:
         """Smoothness cost, for trajectories etc."""
