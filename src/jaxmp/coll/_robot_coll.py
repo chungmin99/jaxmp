@@ -12,7 +12,6 @@ import trimesh.bounds
 import yourdfpy
 
 import jax
-import numpy as onp
 from jax import Array
 import jax.numpy as jnp
 import jaxlie
@@ -117,6 +116,8 @@ class RobotColl:
         logger.info("Found {} collision bodies", len(coll_link_meshes))
 
         coll_links = coll_handler(coll_link_meshes)
+        if isinstance(coll_links, CollGeom):
+            assert len(coll_links.get_batch_axes()) == 1
 
         num_colls = len(link_joint_idx)
         link_joint_idx = jnp.array(link_joint_idx)

@@ -2,7 +2,7 @@
 Similar to 01_kinematics.py, but with collision avoidance as a cost.
 """
 
-from typing import Optional
+from typing import Optional, Literal
 from pathlib import Path
 import time
 import jax
@@ -24,22 +24,15 @@ from jaxmp import JaxKinTree, RobotFactors
 from jaxmp.coll import Plane, RobotColl, Sphere, CollGeom
 from jaxmp.extras.urdf_loader import load_urdf
 
-# on gpu: 86something ms
-# set device to cpu --> 1.5 second per
-# jax.config.update("jax_platform_name", "cpu")
-
-# on cpu it's like 92?
-# on GPU it's like 172
-# oh....
-
-# set device to CPU... :'( it's still faster on CPU for single problem (e.g., this demonstration script).
-# jax.config.update("jax_platform_name", "cpu")
-
 
 def main(
-    robot_description: str = "yumi_description",
+    robot_description: str = "yumi",
     robot_urdf_path: Optional[Path] = None,
+    device: Literal["cpu", "gpu"] = "cpu",
 ):
+    # Set device.
+    jax.config.update("jax_platform_name", device)
+
     urdf = load_urdf(robot_description, robot_urdf_path)
     robot_coll = RobotColl.from_urdf(urdf)
     kin = JaxKinTree.from_urdf(urdf)
