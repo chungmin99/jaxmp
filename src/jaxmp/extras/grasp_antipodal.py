@@ -116,7 +116,9 @@ class AntipodalGrasps:
 
         return sum(meshes, trimesh.Trimesh())
 
-    def to_se3(self, along_axis: Literal["x", "y", "z"] = "x", flip_axis: bool = False) -> jaxlie.SE3:
+    def to_se3(
+        self, along_axis: Literal["x", "y", "z"] = "x", flip_axis: bool = False
+    ) -> jaxlie.SE3:
         # Create rotmat, first assuming the x-axis is the grasp axis.
         x_axes = self.axes
         if flip_axis:

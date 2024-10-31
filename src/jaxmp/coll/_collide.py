@@ -95,8 +95,12 @@ def collide(
     broadcast_shape = jnp.broadcast_shapes(
         geom_0.get_batch_axes(), geom_1.get_batch_axes()
     )
-    geom_0 = geom_0.broadcast_to(*broadcast_shape).reshape(-1,)
-    geom_1 = geom_1.broadcast_to(*broadcast_shape).reshape(-1,)
+    geom_0 = geom_0.broadcast_to(*broadcast_shape).reshape(
+        -1,
+    )
+    geom_1 = geom_1.broadcast_to(*broadcast_shape).reshape(
+        -1,
+    )
 
     # Retrieve the function -- while also shuffling all arguments.
     func, geom_0, geom_1 = _get_coll_func(geom_0, geom_1)

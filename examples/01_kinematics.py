@@ -115,6 +115,14 @@ def main(
     )
 
     smooth_handle = server.gui.add_checkbox("Smooth", initial_value=False)
+    
+    with server.gui.add_folder("Manipulability"):
+        manipulabiltiy_weight_handler = server.gui.add_slider(
+            "weight", 0.0, 0.01, 0.001, 0.00
+        )
+        manipulability_cost_handler = server.gui.add_number(
+            "Yoshikawa index", 0.001, disabled=True
+        )
 
     set_frames_to_current_pose = server.gui.add_button("Set frames to current pose")
     add_joint_button = server.gui.add_button("Add joint!")
@@ -216,6 +224,7 @@ def main(
         target_poses = jaxlie.SE3(
             jnp.stack([pose.wxyz_xyz for pose in target_pose_list])
         )
+        manipulability_weight = manipulabiltiy_weight_handler.value
 
         if smooth_handle.value:
             initial_pose = joints

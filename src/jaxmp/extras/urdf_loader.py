@@ -15,12 +15,13 @@ def load_urdf(
 ) -> yourdfpy.URDF:
     """
     Loads a robot from a URDF file or a robot description, using yourdfpy.
-    
+
     Applies two small changes:
     - Modifies yourdfpy filehandler to load files relative to the URDF file, and
     - Sorts the joints in topological order.
     """
     if robot_urdf_path is not None:
+
         def filename_handler(fname: str) -> str:
             base_path = robot_urdf_path.parent
             return yourdfpy.filename_handler_magic(fname, dir=base_path)
@@ -28,6 +29,7 @@ def load_urdf(
         urdf = yourdfpy.URDF.load(robot_urdf_path, filename_handler=filename_handler)
     elif robot_description is not None:
         from robot_descriptions.loaders.yourdfpy import load_robot_description
+
         if "description" not in robot_description:
             robot_description += "_description"
         urdf = load_robot_description(robot_description)
@@ -70,7 +72,9 @@ def _sort_joint_map(urdf: yourdfpy.URDF) -> yourdfpy.URDF:
     return updated_urdf
 
 
-def lock_joints(urdf: yourdfpy.URDF, joint_names: list[str], lock_joint_cfg: list[float]) -> yourdfpy.URDF:
+def lock_joints(
+    urdf: yourdfpy.URDF, joint_names: list[str], lock_joint_cfg: list[float]
+) -> yourdfpy.URDF:
     """Lock the joints in the URDF, by setting their limits to the current value."""
     joints = deepcopy(urdf.robot.joints)
     for joint in joints:
@@ -80,7 +84,9 @@ def lock_joints(urdf: yourdfpy.URDF, joint_names: list[str], lock_joint_cfg: lis
             if joint.type == "prismatic":
                 matrix = joint.origin @ tra.translation_matrix(joint_cfg * joint.axis)
             else:
-                matrix = joint.origin @ tra.rotation_matrix(float(joint_cfg), joint.axis)
+                matrix = joint.origin @ tra.rotation_matrix(
+                    float(joint_cfg), joint.axis
+                )
 
             joint.type = "fixed"
             joint.mimic = None  # Can't mimic a fixed joint.

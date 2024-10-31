@@ -106,6 +106,7 @@ def main(
     has_jitted = False
     while True:
         if visualize_coll.value:
+            assert isinstance(robot_coll.coll, CollGeom)
             collbody_handle = server.scene.add_mesh_trimesh(
                 "coll",
                 robot_coll.coll.transform(

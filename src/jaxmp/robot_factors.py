@@ -400,7 +400,7 @@ class RobotFactors:
         var_idx: jax.Array | int,
         kin: JaxKinTree,
         target_joint_indices: jax.Array,
-        weights: Array,
+        weights: float,
     ) -> list[jaxls.Factor]:
         """Manipulability cost."""
 

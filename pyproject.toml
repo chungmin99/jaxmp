@@ -25,9 +25,17 @@ dependencies = [
     "robot_descriptions",
     "jaxls",
     "mujoco-mjx==3.2.3",
+    "jaxls @ git+https://github.com/brentyi/jaxls.git",
 ]
 
 [project.optional-dependencies]
+dev = [
+    "pyright>=1.1.308",
+    "ruff",
+]
 examples = [
     "viser>=0.2.0",
 ]
+
+[tool.ruff.lint]
+ignore = ["F722"]  # Ignore jaxtyping forward annotation errors

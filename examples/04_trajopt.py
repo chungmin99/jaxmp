@@ -133,11 +133,11 @@ def solve_traj_gomp(
     solution = graph.solve(
         initial_vals=jaxls.VarValues.make(traj_vars),
         trust_region=jaxls.TrustRegionConfig(lambda_initial=0.2),
-        termination=jaxls.TerminationConfig(gradient_tolerance=1e-5, parameter_tolerance=1e-5),
+        termination=jaxls.TerminationConfig(
+            gradient_tolerance=1e-5, parameter_tolerance=1e-5
+        ),
     )
-    return jnp.stack([
-        solution[JointVar(tstep)] for tstep in range(timesteps)
-    ])
+    return jnp.stack([solution[JointVar(tstep)] for tstep in range(timesteps)])
 
 
 def main(
@@ -154,8 +154,7 @@ def main(
 
     kin = JaxKinTree.from_urdf(urdf)
     trajectory = onp.load(
-        Path(__file__).parent / "assets/yumi_trajectory.npy",
-        allow_pickle=True
+        Path(__file__).parent / "assets/yumi_trajectory.npy", allow_pickle=True
     ).item()  # {'joint_name': [time, wxyz_xyz]}
     timesteps = list(trajectory.values())[0].shape[0]
     rest_pose = (kin.limits_upper + kin.limits_lower) / 2
@@ -165,9 +164,7 @@ def main(
         [kin.joint_names.index(k) for k in trajectory.keys()]
     )
     # Add trajectory visualization.
-    target_pose = jaxlie.SE3(
-        jnp.stack([v for v in trajectory.values()])
-    )
+    target_pose = jaxlie.SE3(jnp.stack([v for v in trajectory.values()]))
     traj_handle = server.scene.add_transform_controls("traj_handle", scale=0.2)
     traj_center = target_pose.translation().reshape(-1, 3).mean(axis=0)
     traj_handle.position = onp.array(traj_center)
@@ -178,7 +175,7 @@ def main(
             batched_positions=joint_pose_traj[:, 4:],
             batched_wxyzs=joint_pose_traj[:, :4],
             axes_length=0.04,
-            axes_radius=0.004
+            axes_radius=0.004,
         )
 
     freeze_target_xyz_xyz = jnp.ones(6)
@@ -192,9 +189,8 @@ def main(
         limit_weight=limit_weight,
         smoothness_weight=smoothness_weight,
         rest_pose=rest_pose,
-        freeze_target_xyz_xyz=freeze_target_xyz_xyz
+        freeze_target_xyz_xyz=freeze_target_xyz_xyz,
     )
-    traj = onp.array(traj)
 
     with server.gui.add_folder("Target frame"):
         freeze_target_x = server.gui.add_checkbox("Freeze x", initial_value=True)
@@ -205,6 +201,7 @@ def main(
         freeze_target_rz = server.gui.add_checkbox("Freeze rz", initial_value=True)
 
     update_traj_handle = server.gui.add_button("Regenerate traj")
+
     @update_traj_handle.on_click
     def _(_):
         nonlocal traj
@@ -221,9 +218,7 @@ def main(
             ]
         ).astype(jnp.float32)
 
-        target_pose = jaxlie.SE3(
-            jnp.stack([v for v in trajectory.values()])
-        )
+        target_pose = jaxlie.SE3(jnp.stack([v for v in trajectory.values()]))
         traj_center = target_pose.translation().reshape(-1, 3).mean(axis=0)
         target_pose = jaxlie.SE3.from_rotation_and_translation(
             rotation=jaxlie.SO3(jnp.array(traj_handle.wxyz)),
@@ -233,7 +228,7 @@ def main(
                 target_pose.wxyz_xyz[..., 4:] - traj_center
             )
         )
-        traj_jnp = solve_traj_gomp(
+        traj = solve_traj_gomp(
             kin,
             target_pose,
             target_joint_indices,
@@ -243,18 +238,18 @@ def main(
             limit_weight=limit_weight,
             smoothness_weight=smoothness_weight,
             rest_pose=rest_pose,
-            freeze_target_xyz_xyz=freeze_target_xyz_xyz
+            freeze_target_xyz_xyz=freeze_target_xyz_xyz,
         )
-        traj = onp.array(traj_jnp)
         update_traj_handle.disabled = False
 
     # Visualize!
     slider = server.gui.add_slider(
         "Timestep", min=0, max=timesteps - 1, step=1, initial_value=0
     )
+
     @slider.on_update
     def _(_) -> None:
-        urdf_orig.update_cfg(traj[slider.value])
+        urdf_orig.update_cfg(onp.array(traj[slider.value]))
 
         Ts_world_joint = onp.array(kin.forward_kinematics(traj[slider.value]))
         for idx, joint_name in zip(target_joint_indices, trajectory.keys()):
