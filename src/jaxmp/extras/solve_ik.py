@@ -29,9 +29,9 @@ def solve_ik(
     world_coll_weight: float = 10.0,
     robot_coll: Optional[RobotColl] = None,
     world_coll_list: list[CollGeom] = [],
-    solver_type: jdc.Static[Literal[
-        "cholmod", "conjugate_gradient", "dense_cholesky"
-    ]] = "conjugate_gradient",
+    solver_type: jdc.Static[
+        Literal["cholmod", "conjugate_gradient", "dense_cholesky"]
+    ] = "conjugate_gradient",
     freeze_target_xyz_xyz: Optional[jnp.ndarray] = None,
     freeze_base_xyz_xyz: Optional[jnp.ndarray] = None,
     dt: float = 0.01,
@@ -100,7 +100,7 @@ def solve_ik(
             ),
         ),
     )
-    
+
     if include_manipulability:
         for idx, target_joint_idx in enumerate(target_joint_indices):
             factors.append(

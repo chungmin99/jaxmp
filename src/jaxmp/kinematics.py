@@ -140,7 +140,9 @@ class JaxKinTree:
         )
 
     @staticmethod
-    def _get_act_joint_idx(urdf: yourdfpy.URDF, joint: yourdfpy.Joint, joint_idx: int) -> int:
+    def _get_act_joint_idx(
+        urdf: yourdfpy.URDF, joint: yourdfpy.Joint, joint_idx: int
+    ) -> int:
         """Get the actuated joint index for a joint, checking for mimic joints."""
         # Check if this joint is a mimic joint -- assume multiplier=1.0, offset=0.0.
         if joint.mimic is not None:
@@ -193,27 +195,23 @@ class JaxKinTree:
             parent_index = urdf.joint_names.index(parent_joint.name)
             if parent_index >= joint_idx:
                 logger.warning(
-                    f"Parent index {parent_index} >= joint index {joint_idx}! " +
-                    "Assuming that parent is root."
+                    f"Parent index {parent_index} >= joint index {joint_idx}! "
+                    + "Assuming that parent is root."
                 )
                 if parent_joint.parent != urdf.scene.graph.base_frame:
-                    raise ValueError("Parent index >= joint_index, but parent is not root!")
+                    raise ValueError(
+                        "Parent index >= joint_index, but parent is not root!"
+                    )
                 T_parent_joint = parent_joint.origin @ T_parent_joint  # T_root_joint.
                 parent_index = -1
 
-        return (
-            parent_index,
-            jaxlie.SE3.from_matrix(T_parent_joint).wxyz_xyz
-        )
+        return (parent_index, jaxlie.SE3.from_matrix(T_parent_joint).wxyz_xyz)
 
     @staticmethod
     def _get_joint_limits(joint: yourdfpy.Joint) -> tuple[float, float]:
         """Get the joint limits for an actuated joint, returns (lower, upper)."""
         assert joint.limit is not None
-        if (
-            joint.limit.lower is not None and
-            joint.limit.upper is not None
-        ):
+        if joint.limit.lower is not None and joint.limit.upper is not None:
             lower = joint.limit.lower
             upper = joint.limit.upper
         elif joint.type == "continuous":
@@ -242,7 +240,7 @@ class JaxKinTree:
 
         Args:
             cfg: The configuration of the actuated joints, in the format `(*batch num_act_joints)`.
-        
+
         Returns:
             The SE(3) transforms of the joints, in the format `(*batch num_joints wxyz_xyz)`.
         """

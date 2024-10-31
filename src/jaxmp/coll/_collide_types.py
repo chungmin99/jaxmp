@@ -344,7 +344,9 @@ class Convex(CollGeom):
         hull = scipy.spatial.ConvexHull(mesh.vertices, qhull_options=f"TA{n_verts}")
 
         hull_verts = mesh.vertices[hull.vertices]
-        hull_faces = onp.searchsorted(hull.vertices, hull.simplices.flatten()).reshape(-1, 3)
+        hull_faces = onp.searchsorted(hull.vertices, hull.simplices.flatten()).reshape(
+            -1, 3
+        )
 
         _mesh = trimesh.Trimesh(vertices=hull_verts, faces=hull_faces)
         _mesh.fix_normals()
