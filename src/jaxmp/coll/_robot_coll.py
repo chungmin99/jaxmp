@@ -42,7 +42,7 @@ class RobotColl:
     coll_link_names: jdc.Static[tuple[str]]
     """Names of the links in the robot, length `links`."""
 
-    link_joint_idx: jdc.Static[Int[Array, "colls"]]
+    link_joint_idx: jdc.Static[Int[Array, " colls"]]
     """Index of the parent joint for each collision body."""
 
     link_to_colls: jdc.Static[dict[int, jax.Array]]

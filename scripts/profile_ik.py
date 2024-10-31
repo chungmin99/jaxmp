@@ -4,7 +4,6 @@ Profile IK speed.
 
 import time
 from typing import Literal
-from dataclasses import field
 import jax
 import jax.numpy as jnp
 import jax_dataclasses as jdc

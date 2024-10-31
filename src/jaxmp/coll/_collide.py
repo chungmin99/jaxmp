@@ -79,7 +79,11 @@ def colldist_from_sdf(
     """
     _dist = -_dist
     _dist = jnp.maximum(_dist, -activation_dist)
-    _dist = jnp.where(_dist > 0, _dist + 0.5 * activation_dist, 0.5 / activation_dist * (_dist + activation_dist) ** 2)
+    _dist = jnp.where(
+        _dist > 0,
+        _dist + 0.5 * activation_dist,
+        0.5 / activation_dist * (_dist + activation_dist) ** 2,
+    )
     _dist = jnp.maximum(_dist, 0.0)
     _dist = -_dist
     return _dist

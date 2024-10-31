@@ -3,7 +3,6 @@
 from typing import Optional, Sequence
 
 import jax
-import numpy as onp
 from jax import Array
 import jax.numpy as jnp
 import jaxlie

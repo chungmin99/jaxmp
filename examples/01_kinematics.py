@@ -115,7 +115,7 @@ def main(
     )
 
     smooth_handle = server.gui.add_checkbox("Smooth", initial_value=False)
-    
+
     with server.gui.add_folder("Manipulability"):
         manipulabiltiy_weight_handler = server.gui.add_slider(
             "weight", 0.0, 0.01, 0.001, 0.00
