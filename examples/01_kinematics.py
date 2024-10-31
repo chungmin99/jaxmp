@@ -120,9 +120,7 @@ def main(
         initial_value="conjugate_gradient",
     )
 
-    smooth_handle = server.gui.add_checkbox(
-        "Smooth", initial_value=False
-    )
+    smooth_handle = server.gui.add_checkbox("Smooth", initial_value=False)
 
     with server.gui.add_folder("Manipulability"):
         manipulabiltiy_weight_handler = server.gui.add_slider(
@@ -210,10 +208,12 @@ def main(
             time.sleep(0.1)
             continue
 
-        target_joint_indices = jnp.array([
-            kin.joint_names.index(target_name_handle.value)
-            for target_name_handle in target_name_handles
-        ])
+        target_joint_indices = jnp.array(
+            [
+                kin.joint_names.index(target_name_handle.value)
+                for target_name_handle in target_name_handles
+            ]
+        )
         target_pose_list = [
             jaxlie.SE3(jnp.array([*target_tf_handle.wxyz, *target_tf_handle.position]))
             for target_tf_handle in target_tf_handles
@@ -222,7 +222,7 @@ def main(
             jnp.stack([pose.wxyz_xyz for pose in target_pose_list])
         )
         manipulability_weight = manipulabiltiy_weight_handler.value
-        
+
         if smooth_handle.value:
             initial_pose = joints
             joint_vel_weight = limit_weight
