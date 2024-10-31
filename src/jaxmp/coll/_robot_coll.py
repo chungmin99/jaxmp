@@ -12,6 +12,7 @@ import trimesh.bounds
 import yourdfpy
 
 import jax
+import numpy as onp
 from jax import Array
 import jax.numpy as jnp
 import jaxlie
@@ -45,11 +46,11 @@ class RobotColl:
     link_joint_idx: jdc.Static[Int[Array, "colls"]]
     """Index of the parent joint for each collision body."""
 
-    link_coll_idx: jdc.Static[Int[Array, "colls"]]
-    """Index of the link for each collision body, in `coll_link_names`."""
+    link_to_colls: jdc.Static[dict[int, jax.Array]]
+    """Mapping from each link to the indices of its collision bodies."""
 
     self_coll_list: jdc.Static[Sequence[tuple[int, int]]]
-    """Collision matrix, where we store the list of colliding bodies."""
+    """Collision matrix, where we store the list of colliding links."""
 
     @staticmethod
     def from_urdf(
@@ -81,7 +82,7 @@ class RobotColl:
         coll_link_meshes = list[trimesh.Trimesh]()
         link_joint_idx = list[int]()
         link_names = list[str]()
-        link_coll_idx = list[int]()
+        link_to_colls = dict[int, jax.Array]()
 
         if self_coll_ignore is None:
             self_coll_ignore = []
@@ -92,15 +93,22 @@ class RobotColl:
             assert curr_link in urdf.link_map
 
             coll_link = RobotColl._get_coll_links(urdf, curr_link)
-            if coll_link is None:
+            if len(coll_link) == 0:
                 continue
 
-            coll_idx = len(link_names)
+            # Add the collision links to the list.
+            # 1. First, note the index of the current link.
             link_names.append(curr_link)
+            coll_idx = len(link_names) - 1  # Last link.
 
+            # 2. Add the collision links to the list.
             coll_link_meshes.extend(coll_link)
             link_joint_idx.extend([joint_idx] * len(coll_link))
-            link_coll_idx.extend([coll_idx] * len(coll_link))
+
+            # 3. Update the mapping from link to collision bodies.
+            end = len(link_joint_idx)
+            start = end - len(coll_link)
+            link_to_colls[coll_idx] = jnp.arange(start, end)
 
             if ignore_immediate_parent:
                 self_coll_ignore.append((joint.parent, joint.child))
@@ -111,14 +119,12 @@ class RobotColl:
         coll_links = coll_handler(coll_link_meshes)
 
         num_colls = len(link_joint_idx)
-        link_coll_idx = jnp.array(link_coll_idx)
         link_joint_idx = jnp.array(link_joint_idx)
         link_names = tuple[str](link_names)
 
         self_coll_list = RobotColl.create_self_coll_list(
             link_names,
             self_coll_ignore,
-            link_coll_idx,
         )
 
         return RobotColl(
@@ -126,7 +132,7 @@ class RobotColl:
             coll=coll_links,
             coll_link_names=link_names,
             link_joint_idx=link_joint_idx,
-            link_coll_idx=link_coll_idx,
+            link_to_colls=link_to_colls,
             self_coll_list=self_coll_list,
         )
 
@@ -171,25 +177,40 @@ class RobotColl:
 
         return coll_link_mesh
 
-    def coll_weight(
+    def make_self_coll_params(
         self,
-        weight: float = 1.0,
+        default: float,
+        override_weights: dict[tuple[str, str], float] = {},
+    ) -> jax.Array:
+        values = jnp.full((len(self.self_coll_list),), default)
+        for (name_0, name_1), weight in override_weights.items():
+            idx_0 = self.coll_link_names.index(name_0)
+            idx_1 = self.coll_link_names.index(name_1)
+            if (idx_0, idx_1) in self.self_coll_list:
+                values = values.at[self.self_coll_list.index((idx_0, idx_1))].set(
+                    weight
+                )
+            if (idx_1, idx_0) in self.self_coll_list:
+                values = values.at[self.self_coll_list.index((idx_1, idx_0))].set(
+                    weight
+                )
+        return values
+
+    def make_world_coll_params(
+        self,
+        default: float,
         override_weights: dict[str, float] = {},
-    ) -> Float[Array, "colls"]:
-        """Get the collision weight for each sphere."""
-        coll_weights = jnp.full((self.num_colls,), weight)
+    ) -> jax.Array:
+        values = jnp.full((len(self.coll_link_names),), default)
         for name, weight in override_weights.items():
             idx = self.coll_link_names.index(name)
-            coll_weights = jnp.where(
-                self.link_coll_idx == idx, jnp.array(weight), coll_weights
-            )
-        return jnp.array(coll_weights)
+            values = values.at[idx].set(weight)
+        return values
 
     @staticmethod
     def create_self_coll_list(
         coll_link_names: tuple[str],
         self_coll_ignore: list[tuple[str, str]],
-        link_coll_idx: Int[Array, "colls"],
     ) -> Sequence[tuple[int, int]]:
         """
         Create a collision matrix for the robot, where `coll_matrix[i, j] == 1`.
@@ -207,11 +228,11 @@ class RobotColl:
             return True
 
         coll_list = []
-        for i, idx_0 in enumerate(link_coll_idx):
-            for j, idx_1 in enumerate(link_coll_idx):
+        for i in range(len(coll_link_names)):
+            for j in range(len(coll_link_names)):
                 if i <= j:
                     continue
-                if check_coll(idx_0, idx_1):
+                if check_coll(i, j):
                     coll_list.append((i, j))
         return coll_list
 

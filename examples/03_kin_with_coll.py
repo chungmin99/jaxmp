@@ -280,7 +280,7 @@ def solve_ik_with_coll(
     )
 
     # Update visualization.
-    joints = solution[JointVar(0)]
+    joints = solution[JointVar(joint_var_idx)]
     return joints
 
 

@@ -3,6 +3,7 @@
 from typing import Optional, Sequence
 
 import jax
+import numpy as onp
 from jax import Array
 import jax.numpy as jnp
 import jaxlie
@@ -72,7 +73,7 @@ class RobotFactors:
     ) -> jaxls.Factor:
         """Pose cost."""
 
-        def factor_fun(
+        def ik_cost(
             vals: jaxls.VarValues,
             kin: JaxKinTree,
             target_pose: jaxlie.SE3,
@@ -127,7 +128,7 @@ class RobotFactors:
             ee_se3_var = OffsetConstrainedSE3VarType(offset_se3_var_idx)
 
         return jaxls.Factor(
-            factor_fun,
+            ik_cost,
             (
                 kin,
                 target_pose,
@@ -227,10 +228,13 @@ class RobotFactors:
         var_idx: jax.Array | int,
         kin: JaxKinTree,
         robot_coll: RobotColl,
-        eta: float,
-        weights: float,
+        activation_dist: jax.Array | float,
+        weights: jax.Array | float,
     ) -> Sequence[jaxls.Factor]:
-        """Collision-scaled dist for self-collision."""
+        """Collision-scaled dist for self-collision.
+        `activation_dist` and `weights` should be given in terms of the collision link pairs,
+        e.g., through `RobotColl.coll_weight`.
+        """
 
         # jaxls does not support static/varying treedefs, for batching.
         def self_coll_cost(
@@ -238,20 +242,36 @@ class RobotFactors:
             kin: JaxKinTree,
             robot_coll: RobotColl,
             var: jaxls.Var[Array],
-            eta: float,
+            activation_dist: float,
             weights: float,
-            pair: tuple[int, int],
+            indices_0: jax.Array,
+            indices_1: jax.Array,
         ) -> Array:
             joint_cfg = vals[var]
             colls = robot_coll.at_joints(kin, joint_cfg)
             assert isinstance(colls, CollGeom)
-            coll_0 = colls.slice(..., pair[0])
-            coll_1 = colls.slice(..., pair[1])
+            coll_0 = colls.slice(..., indices_0)
+            coll_1 = colls.slice(..., indices_1)
 
             sdf = collide(coll_0, coll_1).dist
-            return (colldist_from_sdf(sdf, eta=eta) * weights).flatten()
+            return (
+                colldist_from_sdf(sdf, activation_dist=activation_dist) * weights
+            ).flatten()
 
         assert isinstance(robot_coll.coll, CollGeom)
+
+        if isinstance(weights, float) or isinstance(weights, int):
+            weights = jnp.full((len(robot_coll.self_coll_list),), weights)
+        else:
+            assert len(weights) == len(robot_coll.self_coll_list)
+
+        if isinstance(activation_dist, float) or isinstance(activation_dist, int):
+            activation_dist = jnp.full(
+                (len(robot_coll.self_coll_list),), activation_dist
+            )
+        else:
+            assert len(activation_dist) == len(robot_coll.self_coll_list)
+
         return [
             jaxls.Factor(
                 self_coll_cost,
@@ -259,12 +279,17 @@ class RobotFactors:
                     kin,
                     robot_coll,
                     JointVarType(var_idx),
-                    eta,
-                    weights,
-                    pair,
+                    _activation_dist,
+                    _weights,
+                    robot_coll.link_to_colls[pair[0]],
+                    robot_coll.link_to_colls[pair[1]],
                 ),
             )
-            for pair in robot_coll.self_coll_list
+            for (pair, _activation_dist, _weights) in zip(
+                robot_coll.self_coll_list,
+                activation_dist,
+                weights,
+            )
         ]
 
     @staticmethod
@@ -274,8 +299,8 @@ class RobotFactors:
         kin: JaxKinTree,
         robot_coll: RobotColl,
         other: CollGeom,
-        eta: float,
-        weights: float,
+        activation_dist: float | jax.Array,
+        weights: float | jax.Array,
         base_tf_var: jaxls.Var[jaxlie.SE3] | jaxlie.SE3 | None = None,
     ) -> Sequence[jaxls.Factor]:
         """Collision-scaled dist for world collision."""
@@ -289,7 +314,7 @@ class RobotFactors:
             eta: float,
             weights: float,
             base_tf_var: jaxls.Var[jaxlie.SE3] | jaxlie.SE3 | None,
-            coll_idx: int,
+            coll_indices: jax.Array,
         ) -> Array:
             joint_cfg = vals[var]
             if isinstance(base_tf_var, jaxls.Var):
@@ -301,12 +326,25 @@ class RobotFactors:
 
             coll = robot_coll.at_joints(kin, joint_cfg)
             assert isinstance(coll, CollGeom)
-            coll = coll.slice(..., coll_idx).transform(base_tf)
+            coll = coll.slice(..., coll_indices).transform(base_tf)
 
             sdf = collide(coll, other).dist
-            return (colldist_from_sdf(sdf, eta=eta) * weights).flatten()
+            return (colldist_from_sdf(sdf, activation_dist=eta) * weights).flatten()
 
         assert isinstance(robot_coll.coll, CollGeom)
+
+        if isinstance(weights, float) or isinstance(weights, int):
+            weights = jnp.full((len(robot_coll.coll_link_names),), weights)
+        else:
+            assert len(weights) == len(robot_coll.coll_link_names)
+
+        if isinstance(activation_dist, float) or isinstance(activation_dist, int):
+            activation_dist = jnp.full(
+                (len(robot_coll.coll_link_names),), activation_dist
+            )
+        else:
+            assert len(activation_dist) == len(robot_coll.coll_link_names)
+
         return [
             jaxls.Factor(
                 world_coll_cost,
@@ -315,13 +353,17 @@ class RobotFactors:
                     robot_coll,
                     JointVarType(joint_idx),
                     other,
-                    eta,
-                    weights,
+                    _activation_dist,
+                    _weights,
                     base_tf_var,
-                    coll_idx,
+                    robot_coll.link_to_colls[coll_idx],
                 ),
             )
-            for coll_idx in range(robot_coll.num_colls)
+            for (coll_idx, _activation_dist, _weights) in zip(
+                range(len(robot_coll.coll_link_names)),
+                activation_dist,
+                weights,
+            )
         ]
 
     @staticmethod
@@ -369,7 +411,9 @@ class RobotFactors:
             target_joint_idx: int,
         ) -> Array:
             joint_cfg: jax.Array = vals[var]
-            manipulability = RobotFactors.manip_yoshikawa(kin, joint_cfg, target_joint_idx)
+            manipulability = RobotFactors.manip_yoshikawa(
+                kin, joint_cfg, target_joint_idx
+            )
             return (1 / manipulability + 1e-6) * weights
 
         return [

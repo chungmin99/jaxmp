@@ -64,7 +64,7 @@ class Collision:
 
 def colldist_from_sdf(
     _dist: jax.Array,
-    eta: float = 0.05,
+    activation_dist: float = 0.05,
 ) -> jax.Array:
     """
     Convert a signed distance field to a collision distance field,
@@ -78,8 +78,8 @@ def colldist_from_sdf(
         Collision distance field values (n_dists,).
     """
     _dist = -_dist
-    _dist = jnp.maximum(_dist, -eta)
-    _dist = jnp.where(_dist > 0, _dist + 0.5 * eta, 0.5 / eta * (_dist + eta) ** 2)
+    _dist = jnp.maximum(_dist, -activation_dist)
+    _dist = jnp.where(_dist > 0, _dist + 0.5 * activation_dist, 0.5 / activation_dist * (_dist + activation_dist) ** 2)
     _dist = jnp.maximum(_dist, 0.0)
     _dist = -_dist
     return _dist
