@@ -29,6 +29,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+dev = [
+    "pyright>=1.1.308",
+    "ruff",
+]
 examples = [
     "viser>=0.2.0",
 ]
