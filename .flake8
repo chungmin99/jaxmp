@@ -1,0 +1,8 @@
+[flake8]
+# E203: whitespace before :
+# E501: line too long (<n> characters)
+# W503: line break before binary operator
+# F722: syntax error in forward annotation
+; ignore = E203,E501,D100,D101,D102,D103,W503
+ignore = E203,E501,W503,F722,F821
+per-file-ignores = __init__.py:F401,F403

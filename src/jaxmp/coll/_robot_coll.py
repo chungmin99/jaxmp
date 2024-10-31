@@ -37,7 +37,7 @@ class RobotColl:
     coll_link_names: jdc.Static[tuple[str]]
     """Names of the links in the robot, length `links`."""
 
-    link_joint_idx: jdc.Static[Int[Array, "link"]]
+    link_joint_idx: jdc.Static[Int[Array, " link"]]
     """Index of the parent joint for each link."""
 
     self_coll_matrix: jdc.Static[Int[Array, "link link"]]
@@ -159,7 +159,7 @@ class RobotColl:
 
     def coll_weight(
         self, weights: dict[str, float], default: float = 1.0
-    ) -> Float[Array, "links"]:
+    ) -> Float[Array, " links"]:
         """Get the collision weight for each sphere."""
         num_links = len(self.coll_link_names)
         coll_weights = jnp.full((num_links,), default)

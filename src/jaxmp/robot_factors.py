@@ -4,7 +4,6 @@ from typing import Optional
 
 import jax
 from jax import Array
-import jax_dataclasses as jdc
 import jax.numpy as jnp
 import jaxlie
 

@@ -9,7 +9,6 @@ Includes:
 
 from __future__ import annotations
 
-from copy import deepcopy
 from typing import Callable
 
 import jax
@@ -39,22 +38,22 @@ class JaxKinTree:
     Ts_parent_joint: Float[Array, "joints 7"]
     """Transform from parent joint to current joint, in the format `joints 7`."""
 
-    idx_parent_joint: Int[Array, "joints"]
+    idx_parent_joint: Int[Array, " joints"]
     """Parent joint index for each joint. -1 for root."""
 
-    idx_actuated_joint: Int[Array, "joints"]
+    idx_actuated_joint: Int[Array, " joints"]
     """Index of actuated joint for each joint, for handling mimic joints. -1 otherwise."""
 
-    limits_lower: Float[Array, "act_joints"]
+    limits_lower: Float[Array, " act_joints"]
     """Lower joint limits for each actuated joint."""
 
-    limits_upper: Float[Array, "act_joints"]
+    limits_upper: Float[Array, " act_joints"]
     """Upper joint limits for each actuated joint."""
 
     joint_names: jdc.Static[tuple[str]]
     """Names of the joints, in shape `joints`."""
 
-    joint_vel_limit: Float[Array, "act_joints"]
+    joint_vel_limit: Float[Array, " act_joints"]
     """Joint limit velocities for each actuated joint."""
 
     @staticmethod
