@@ -395,11 +395,11 @@ class RobotFactors:
         )
 
     @staticmethod
-    def manipulability_cost_factor(
+    def manipulability_cost_factors(
         JointVarType: type[jaxls.Var[Array]],
         var_idx: jax.Array | int,
         kin: JaxKinTree,
-        target_joint_indices: Sequence[int],
+        target_joint_indices: jax.Array,
         weights: Array,
     ) -> list[jaxls.Factor]:
         """Manipulability cost."""
@@ -414,7 +414,7 @@ class RobotFactors:
             manipulability = RobotFactors.manip_yoshikawa(
                 kin, joint_cfg, target_joint_idx
             )
-            return (1 / manipulability + 1e-6) * weights
+            return ((1 / manipulability + 1e-6) * weights).flatten()
 
         return [
             jaxls.Factor(

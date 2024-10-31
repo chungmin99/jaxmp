@@ -90,9 +90,11 @@ def main(
         )
 
     ConstrainedSE3Var = RobotFactors.get_constrained_se3(get_freeze_base_xyz_xyz())
+
     def update_constrained_se3_var():
         nonlocal ConstrainedSE3Var
         ConstrainedSE3Var = RobotFactors.get_constrained_se3(get_freeze_base_xyz_xyz())
+
     for handle in T_base_world_handles:
         handle.on_update(lambda _: update_constrained_se3_var())
 
@@ -128,6 +130,15 @@ def main(
     urdf_base_frame.position = onp.array(base_pose.translation())
     urdf_base_frame.wxyz = onp.array(base_pose.rotation().wxyz)
     urdf_vis.update_cfg(onp.array(joints))
+
+    # Manipulability weight.
+    with server.gui.add_folder("Manipulability"):
+        manipulabiltiy_weight_handler = server.gui.add_slider(
+            "weight", 0.0, 0.01, 0.001, 0.00
+        )
+        manipulability_cost_handler = server.gui.add_number(
+            "Yoshikawa index", 0.001, disabled=True
+        )
 
     # Add joints.
     def add_joint():
@@ -213,8 +224,9 @@ def main(
             initial_pose = rest_pose
             joint_vel_weight = 0.0
 
-        ik_weight = jnp.array([pos_weight]*3 + [rot_weight]*3)
+        ik_weight = jnp.array([pos_weight] * 3 + [rot_weight] * 3)
         ik_weight = ik_weight * get_freeze_target_xyz_xyz()
+        manipulability_weight = manipulabiltiy_weight_handler.value
 
         # Solve!
         start_time = time.time()
@@ -229,6 +241,8 @@ def main(
             rest_weight=rest_weight,
             limit_weight=limit_weight,
             joint_vel_weight=joint_vel_weight,
+            use_manipulability=(manipulability_weight > 0),
+            manipulability_weight=manipulability_weight,
             solver_type=solver_type_handle.value,
         )
 
@@ -251,6 +265,13 @@ def main(
             )
             target_frame_handle.position = onp.array(T_target_world.translation())
             target_frame_handle.wxyz = onp.array(T_target_world.rotation().wxyz)
+
+        # Update manipulability cost.
+        manip_cost = 0
+        for target_joint_idx in target_joint_indices:
+            manip_cost += RobotFactors.manip_yoshikawa(kin, joints, target_joint_idx)
+        manip_cost /= len(target_joint_indices)
+        manipulability_cost_handler.value = onp.array(manip_cost).item()
 
 
 if __name__ == "__main__":

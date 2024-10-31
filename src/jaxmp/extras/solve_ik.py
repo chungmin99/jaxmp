@@ -25,6 +25,8 @@ def solve_ik(
     limit_weight: float = 100.0,
     joint_vel_weight: float = 0.0,
     dt: float = 0.01,
+    use_manipulability: jdc.Static[bool] = False,
+    manipulability_weight: float = 0.001,
     solver_type: jdc.Static[
         Literal["cholmod", "conjugate_gradient", "dense_cholesky"]
     ] = "conjugate_gradient",
@@ -49,6 +51,7 @@ def solve_ik(
         solver_type: Type of solver to use.
         dt: Time step for the velocity cost factor.
         max_iterations: Maximum number of iterations for the solver.
+        manipulability_weight: Weight for the manipulability cost factor.
     Returns:
         Base pose (jaxlie.SE3)
         Joint angles (jnp.ndarray)
@@ -93,6 +96,17 @@ def solve_ik(
             base_se3_var_idx=pose_var_idx,
         ),
     )
+
+    if use_manipulability:
+        factors.extend(
+            RobotFactors.manipulability_cost_factors(
+                JointVar,
+                joint_var_idx,
+                kin,
+                target_joint_indices,
+                manipulability_weight,
+            )
+        )
 
     joint_vars: list[jaxls.Var] = [JointVar(joint_var_idx)]
     joint_var_values: list[jaxls.Var | jaxls._variables.VarWithValue] = [
