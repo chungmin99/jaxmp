@@ -20,7 +20,8 @@ from jaxtyping import Float, Int
 import jax_dataclasses as jdc
 
 from jaxmp.kinematics import JaxKinTree
-from jaxmp.coll._collide_types import Capsule, CollGeom
+from jaxmp.coll._collide_types import Capsule, CollGeom, Convex
+from jaxmp.coll._collide import collide
 
 
 def _capsules_from_meshes(meshes: Sequence[trimesh.Trimesh]) -> Capsule:
@@ -30,20 +31,26 @@ def _capsules_from_meshes(meshes: Sequence[trimesh.Trimesh]) -> Capsule:
 
 @jdc.pytree_dataclass
 class RobotColl:
-    """Collision model for a robot, which can be put into different configurations."""
+    """Collision model for a robot, which can be put into different configurations.
+    For optimization, we assume that `coll` is a single `CollGeom`.
+    """
+
+    num_colls: jdc.Static[int]
 
     coll: CollGeom | Sequence[CollGeom]
+    """Collision model for the robot, either a single `CollGeom` or a list of them."""
 
     coll_link_names: jdc.Static[tuple[str]]
     """Names of the links in the robot, length `links`."""
 
-    link_joint_idx: jdc.Static[Int[Array, "link"]]
-    """Index of the parent joint for each link."""
+    link_joint_idx: jdc.Static[Int[Array, " colls"]]
+    """Index of the parent joint for each collision body."""
 
-    self_coll_matrix: jdc.Static[Int[Array, "link link"]]
-    """Collision matrix, where `coll_matrix[i, j] == 1`
-    if we account for the collision between collbodies `i` and `j`.
-    Else, `coll_matrix[i, j] == 0`."""
+    link_to_colls: jdc.Static[dict[int, jax.Array]]
+    """Mapping from each link to the indices of its collision bodies."""
+
+    self_coll_list: jdc.Static[Sequence[tuple[int, int]]]
+    """Collision matrix, where we store the list of colliding links."""
 
     @staticmethod
     def from_urdf(
@@ -73,8 +80,9 @@ class RobotColl:
 
         # Gather all the collision links.
         coll_link_meshes = list[trimesh.Trimesh]()
-        idx_parent_joint = list[int]()
+        link_joint_idx = list[int]()
         link_names = list[str]()
+        link_to_colls = dict[int, jax.Array]()
 
         if self_coll_ignore is None:
             self_coll_ignore = []
@@ -84,13 +92,23 @@ class RobotColl:
             curr_link = joint.child
             assert curr_link in urdf.link_map
 
-            coll_link = RobotColl._get_coll_link(urdf, curr_link)
-            if coll_link is None:
+            coll_link = RobotColl._get_coll_links(urdf, curr_link)
+            if len(coll_link) == 0:
                 continue
 
-            coll_link_meshes.append(coll_link)
-            idx_parent_joint.append(joint_idx)
+            # Add the collision links to the list.
+            # 1. First, note the index of the current link.
             link_names.append(curr_link)
+            coll_idx = len(link_names) - 1  # Last link.
+
+            # 2. Add the collision links to the list.
+            coll_link_meshes.extend(coll_link)
+            link_joint_idx.extend([joint_idx] * len(coll_link))
+
+            # 3. Update the mapping from link to collision bodies.
+            end = len(link_joint_idx)
+            start = end - len(coll_link)
+            link_to_colls[coll_idx] = jnp.arange(start, end)
 
             if ignore_immediate_parent:
                 self_coll_ignore.append((joint.parent, joint.child))
@@ -99,26 +117,31 @@ class RobotColl:
         logger.info("Found {} collision bodies", len(coll_link_meshes))
 
         coll_links = coll_handler(coll_link_meshes)
+        if isinstance(coll_links, CollGeom):
+            assert len(coll_links.get_batch_axes()) == 1
 
-        idx_parent_joint = jnp.array(idx_parent_joint)
+        num_colls = len(link_joint_idx)
+        link_joint_idx = jnp.array(link_joint_idx)
         link_names = tuple[str](link_names)
 
-        self_coll_matrix = RobotColl.create_self_coll_matrix(
-            urdf, link_names, self_coll_ignore
+        self_coll_list = RobotColl.create_self_coll_list(
+            link_names,
+            self_coll_ignore,
         )
-        assert self_coll_matrix.shape == (len(link_names), len(link_names))
 
         return RobotColl(
+            num_colls=num_colls,
             coll=coll_links,
             coll_link_names=link_names,
-            link_joint_idx=idx_parent_joint,
-            self_coll_matrix=self_coll_matrix,
+            link_joint_idx=link_joint_idx,
+            link_to_colls=link_to_colls,
+            self_coll_list=self_coll_list,
         )
 
     @staticmethod
-    def _get_coll_link(
+    def _get_coll_links(
         urdf: yourdfpy.URDF, curr_link: str
-    ) -> Optional[trimesh.Trimesh]:
+    ) -> Sequence[trimesh.Trimesh]:
         """
         Get the `CapsuleColl` collision primitives for a given link.
         """
@@ -126,9 +149,9 @@ class RobotColl:
 
         coll_mesh_list = urdf.link_map[curr_link].collisions
         if len(coll_mesh_list) == 0:
-            return None
+            return []
 
-        coll_link_mesh = trimesh.Trimesh()
+        coll_link_mesh = []
         for coll in coll_mesh_list:
             # Handle different geometry types.
             coll_mesh: Optional[trimesh.Trimesh] = None
@@ -152,28 +175,45 @@ class RobotColl:
 
             if coll_mesh is None:
                 raise ValueError(f"No collision mesh found for {curr_link}!")
-            coll_link_mesh = coll_link_mesh + coll_mesh
+            coll_link_mesh.append(coll_mesh)
 
-        assert isinstance(coll_link_mesh, trimesh.Trimesh), type(coll_link_mesh)
         return coll_link_mesh
 
-    def coll_weight(
-        self, weights: dict[str, float], default: float = 1.0
-    ) -> Float[Array, "links"]:
-        """Get the collision weight for each sphere."""
-        num_links = len(self.coll_link_names)
-        coll_weights = jnp.full((num_links,), default)
-        for name, weight in weights.items():
+    def make_self_coll_params(
+        self,
+        default: float,
+        override_weights: dict[tuple[str, str], float] = {},
+    ) -> jax.Array:
+        values = jnp.full((len(self.self_coll_list),), default)
+        for (name_0, name_1), weight in override_weights.items():
+            idx_0 = self.coll_link_names.index(name_0)
+            idx_1 = self.coll_link_names.index(name_1)
+            if (idx_0, idx_1) in self.self_coll_list:
+                values = values.at[self.self_coll_list.index((idx_0, idx_1))].set(
+                    weight
+                )
+            if (idx_1, idx_0) in self.self_coll_list:
+                values = values.at[self.self_coll_list.index((idx_1, idx_0))].set(
+                    weight
+                )
+        return values
+
+    def make_world_coll_params(
+        self,
+        default: float,
+        override_weights: dict[str, float] = {},
+    ) -> jax.Array:
+        values = jnp.full((len(self.coll_link_names),), default)
+        for name, weight in override_weights.items():
             idx = self.coll_link_names.index(name)
-            coll_weights = coll_weights.at[idx].set(weight)
-        return jnp.array(coll_weights)
+            values = values.at[idx].set(weight)
+        return values
 
     @staticmethod
-    def create_self_coll_matrix(
-        urdf: yourdfpy.URDF,
+    def create_self_coll_list(
         coll_link_names: tuple[str],
         self_coll_ignore: list[tuple[str, str]],
-    ) -> Int[Array, "link link"]:
+    ) -> Sequence[tuple[int, int]]:
         """
         Create a collision matrix for the robot, where `coll_matrix[i, j] == 1`.
         """
@@ -182,26 +222,21 @@ class RobotColl:
             """Remove self- and adjacent link collisions."""
             if i == j:
                 return False
-
-            if (
-                urdf.link_map[coll_link_names[i]].name,
-                urdf.link_map[coll_link_names[j]].name,
-            ) in self_coll_ignore:
+            if (coll_link_names[i], coll_link_names[j]) in self_coll_ignore:
                 return False
-            if (
-                urdf.link_map[coll_link_names[j]].name,
-                urdf.link_map[coll_link_names[i]].name,
-            ) in self_coll_ignore:
+            if (coll_link_names[j], coll_link_names[i]) in self_coll_ignore:
                 return False
 
             return True
 
-        n_links = len(coll_link_names)
-        coll_mat = jnp.array(
-            [[check_coll(i, j) for j in range(n_links)] for i in range(n_links)]
-        )
-        assert coll_mat.shape == (n_links, n_links)
-        return coll_mat
+        coll_list = []
+        for i in range(len(coll_link_names)):
+            for j in range(len(coll_link_names)):
+                if i <= j:
+                    continue
+                if check_coll(i, j):
+                    coll_list.append((i, j))
+        return coll_list
 
     def at_joints(
         self, kin: JaxKinTree, cfg: Float[jax.Array, "*batch joints"]
@@ -218,3 +253,67 @@ class RobotColl:
             ]
 
         return coll
+
+    def self_coll_dist(
+        self, kin: JaxKinTree, cfg: Float[jax.Array, "*batch joints"]
+    ) -> Float[jax.Array, "*batch"]:
+        """Get the minimum distance between the robot's collision bodies."""
+        batch_size = cfg.shape[:-1]
+        coll = self.at_joints(kin, cfg)
+        if isinstance(coll, CollGeom):
+            dist = collide(
+                coll.reshape(*batch_size, 1, -1), coll.reshape(*batch_size, -1, 1)
+            ).dist
+            coll_list = jnp.array(self.self_coll_list)
+            dist = dist[..., coll_list[:, 0], coll_list[:, 1]]
+            dist = dist.min(axis=-1)
+            assert dist.shape == batch_size
+            return dist
+        else:
+            if isinstance(coll[0], Convex):
+                logger.warning(
+                    "Convex collisions are less reliable, consider using capsules."
+                )
+            min_dist = jnp.full((*batch_size, len(self.self_coll_list)), jnp.inf)
+            for idx, (link_0, link_1) in enumerate(self.self_coll_list):
+                for coll_0 in self.link_to_colls[link_0]:
+                    for coll_1 in self.link_to_colls[link_1]:
+                        dist = collide(coll[coll_0], coll[coll_1]).dist
+                        min_dist = min_dist.at[..., idx].set(
+                            jnp.minimum(dist, min_dist[..., idx])
+                        )
+                        if dist.min() < 0:
+                            print(
+                                self.coll_link_names[link_0],
+                                self.coll_link_names[link_1],
+                            )
+            assert not jnp.any(jnp.isinf(min_dist))
+            min_dist = min_dist.min(axis=-1)
+            assert min_dist.shape == batch_size
+            return min_dist
+
+    def world_coll_dist(
+        self, kin: JaxKinTree, cfg: Float[jax.Array, "*batch joints"], world: CollGeom
+    ) -> Float[jax.Array, "*batch"]:
+        batch_size = cfg.shape[:-1]
+        coll = self.at_joints(kin, cfg)
+        if isinstance(coll, CollGeom):
+            dist = collide(coll, world).dist
+            dist = dist.min(axis=-1)
+            assert dist.shape == batch_size
+            return dist
+        else:
+            if isinstance(coll[0], Convex):
+                logger.warning(
+                    "Convex collisions are less reliable, consider using capsules."
+                )
+            min_dist = jnp.full((*batch_size, len(coll)), jnp.inf)
+            for idx, c in enumerate(coll):
+                dist = collide(c, world).dist
+                min_dist = min_dist.at[..., idx].set(
+                    jnp.minimum(dist, min_dist[..., idx])
+                )
+            assert not jnp.any(jnp.isinf(min_dist))
+            min_dist = min_dist.min(axis=-1)
+            assert min_dist.shape == batch_size
+            return min_dist
