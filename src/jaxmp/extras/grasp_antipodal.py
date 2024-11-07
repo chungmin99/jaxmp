@@ -15,6 +15,7 @@ import jaxlie
 
 import trimesh
 import trimesh.sample
+import trimesh.intersections
 
 
 @jdc.pytree_dataclass
@@ -24,13 +25,22 @@ class AntipodalGrasps:
 
     def __len__(self) -> int:
         return self.centers.shape[0]
+    
+    @staticmethod
+    def from_empty() -> AntipodalGrasps:
+        return AntipodalGrasps(
+            centers=jnp.zeros((0, 3)),
+            axes=jnp.zeros((0, 3)),
+        )
 
     @staticmethod
     def from_sample_mesh(
         mesh: trimesh.Trimesh,
         prng_key: jax.Array,
         max_samples=100,
+        min_width=0.0,
         max_width=float("inf"),
+        max_depth=float("inf"),
         max_angle_deviation=onp.pi / 4,
     ) -> AntipodalGrasps:
         """
@@ -38,6 +48,7 @@ class AntipodalGrasps:
         May return fewer grasps than `max_samples`.
         """
         grasp_centers, grasp_axes = [], []
+        dot_products = []
 
         sampled_points, sampled_face_indices = cast(
             tuple[onp.ndarray, onp.ndarray],
@@ -67,20 +78,95 @@ class AntipodalGrasps:
 
             # Check for antipodal condition.
             grasp_center = (p1 + p2) / 2
-            grasp_direction = p1 - p2
-            grasp_direction /= onp.linalg.norm(grasp_direction)
+            grasp_direction = n1 - n2
+            grasp_direction /= onp.linalg.norm(grasp_direction) + 1e-6
 
+            # If the grasp width is too small, skip. (i.e., not grasping any volume).
+            if grasp_width < min_width:
+                continue
+
+            # If the grasp direction is not aligned with the surface normals, skip.
             if (
-                onp.dot(n1, grasp_direction) > min_dot_product
-                and onp.dot(n2, -grasp_direction) > min_dot_product
+                onp.dot(n1, grasp_direction) < min_dot_product
+                or onp.dot(n2, -grasp_direction) < min_dot_product
             ):
-                grasp_centers.append(grasp_center)
-                grasp_axes.append(grasp_direction)
+                continue
+
+            # If the grasp depth is too deep, skip.
+            line_segments = cast(
+                onp.ndarray,
+                trimesh.intersections.mesh_plane(mesh, grasp_direction, grasp_center),
+            )
+            if len(line_segments) == 0:
+                continue
+
+            AB = line_segments[:, 1] - line_segments[:, 0]
+            AP = grasp_center - line_segments[:, 0]
+            BP = grasp_center - line_segments[:, 1]
+            t = jnp.einsum("ij,ij->i", AP, AB) / jnp.einsum("ij,ij->i", AB, AB)
+            dist = onp.linalg.norm(AP - t[:, None] * AB, axis=-1)
+            dist = jnp.where(t < 0, onp.linalg.norm(AP, axis=-1), dist)
+            dist = jnp.where(t > 1, onp.linalg.norm(BP, axis=-1), dist)
+
+            dist = jnp.min(dist)
+            if dist > max_depth:
+                continue
+
+            grasp_centers.append(grasp_center)
+            grasp_axes.append(grasp_direction)
+            dot_products.append(jnp.abs(onp.dot(n1, n2)))
+
+        # Sort based on grasps' alignment with the surface normals.
+        dot_products = jnp.array(dot_products)
+        sort_indices = jnp.argsort(dot_products, descending=True)
+        grasp_centers = jnp.array(grasp_centers)[sort_indices]
+        grasp_axes = jnp.array(grasp_axes)[sort_indices]
+
+        assert jnp.isnan(grasp_centers).sum() == 0
+        assert jnp.isnan(grasp_axes).sum() == 0
 
         return AntipodalGrasps(
             centers=jnp.array(grasp_centers),
             axes=jnp.array(grasp_axes),
         )
+
+    def nms(self, pos_thresh: float, angle_thresh: float) -> AntipodalGrasps:
+        """
+        Perform non-maximum suppression on the grasps.
+        """
+        centers = self.centers
+        axes = self.axes
+        num_centers = centers.shape[0]
+
+        # Create a mask to keep track of points to keep
+        keep = jnp.ones(num_centers, dtype=jnp.bool_)
+
+        # Compute pairwise distances between centers
+        dist_matrix = jnp.linalg.norm(
+            centers[:, None, :] - centers[None, :, :], axis=-1
+        )
+        angle_matrix = jnp.einsum("ij,kj->ik", axes, axes)
+
+        # Vectorized approach to decide which elements to keep
+        pos_mask = (dist_matrix < pos_thresh) & (
+            dist_matrix > 0
+        )  # Exclude zero distances (self-comparison)
+        angle_mask = (angle_matrix > jnp.cos(angle_thresh)) | (
+            angle_matrix < -jnp.cos(angle_thresh)
+        )
+
+        # Combine masks to determine suppression
+        suppression_mask = pos_mask & angle_mask
+
+        for i in range(num_centers):
+            if not keep[i]:
+                continue
+
+            # Suppress elements in the columns of the current row that match the condition
+            keep = keep & ~(suppression_mask[i])
+
+        # Filter centers and axes using the keep mask
+        return AntipodalGrasps(centers[keep], axes[keep])
 
     def to_trimesh(
         self,
@@ -108,8 +194,10 @@ class AntipodalGrasps:
         mesh.visual.vertex_colors = [150, 150, 255, 255]  # type: ignore[attr-defined]
 
         meshes = []
-        grasp_transforms = self.to_se3(along_axis=along_axis).as_matrix()
-        for idx in range(self.centers.shape[0]):
+        
+        _self = jax.tree.map(lambda x: x.reshape(-1, x.shape[-1]), self)
+        grasp_transforms = _self.to_se3(along_axis=along_axis).as_matrix()
+        for idx in range(_self.centers.shape[0]):
             if indices is not None and idx not in indices:
                 continue
             mesh_copy = mesh.copy()
@@ -211,7 +299,9 @@ def _sample_surface(
     # inside the triangle, so we find vectors longer than 1.0 and
     # transform them to be inside the triangle
     random_test = random_lengths.sum(axis=1).reshape(-1) > 1.0
-    random_lengths = random_lengths.at[random_test].set(random_lengths[random_test] - 1.0)
+    random_lengths = random_lengths.at[random_test].set(
+        random_lengths[random_test] - 1.0
+    )
     random_lengths = jnp.abs(random_lengths)
 
     # multiply triangle edge vectors by the random lengths and sum

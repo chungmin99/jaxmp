@@ -51,7 +51,7 @@ def ik_cost(
     weights = jnp.broadcast_to(weights, residual.shape)
     assert residual.shape == weights.shape
     # residual = (0.1 * residual * weights) / (joint_cfg.shape[0])
-    residual = residual[jnp.argmin(jnp.abs(residual).sum(axis=-1))]
+    residual = residual[jnp.argmin(jnp.abs(residual).sum(axis=-1))] * weights
     return residual.flatten()
 
 
@@ -63,14 +63,14 @@ def solve_ik(
     rest_pose: jnp.ndarray,
     *,
     pos_weight: float = 5.0,
-    rot_weight: float = 1.0,
+    rot_weight: float = 2.0,
     rest_weight: float = 0.01,
     limit_weight: float = 100.0,
     manipulability_weight: float = 0.0,
     include_manipulability: jdc.Static[bool] = False,
     joint_vel_weight: float = 0.0,
     self_coll_weight: float = 2.0,
-    world_coll_weight: float = 10.0,
+    world_coll_weight: float = 20.0,
     robot_coll: Optional[RobotColl] = None,
     include_self_coll: jdc.Static[bool] = False,
     world_coll_list: list[CollGeom] = [],
@@ -103,30 +103,24 @@ def solve_ik(
     joint_vars = [JointVar(0), ConstrainedSE3Var(0)]
 
     factors: list[jaxls.Factor] = [
-        jaxls.Factor(
-            RobotFactors.limit_cost,
-            (
-                kin,
-                JointVar(0),
-                jnp.array([limit_weight] * kin.num_actuated_joints),
-            ),
+        RobotFactors.limit_cost_factor(
+            JointVar,
+            0,
+            kin,
+            jnp.array([limit_weight] * kin.num_actuated_joints),
         ),
-        jaxls.Factor(
-            RobotFactors.joint_limit_vel_cost,
-            (
-                kin,
-                JointVar(0),
-                rest_pose,
-                dt,
-                jnp.array([joint_vel_weight] * kin.num_actuated_joints),
-            ),
+        RobotFactors.limit_vel_cost_factor(
+            JointVar,
+            0,
+            kin,
+            dt,
+            jnp.array([joint_vel_weight] * kin.num_actuated_joints),
+            prev_cfg=rest_pose,
         ),
-        jaxls.Factor(
-            RobotFactors.rest_cost,
-            (
-                JointVar(0),
-                jnp.array([rest_weight] * kin.num_actuated_joints),
-            ),
+        RobotFactors.rest_cost_factor(
+            JointVar,
+            0,
+            jnp.array([rest_weight] * kin.num_actuated_joints),
         ),
     ]
 
@@ -148,47 +142,49 @@ def solve_ik(
     )
     
     if include_manipulability:
-        for idx, target_joint_idx in enumerate(target_joint_indices):
-            factors.append(
-                jaxls.Factor(
-                    RobotFactors.manipulability_cost,
-                    (
-                        kin,
-                        joint_vars[0],
-                        target_joint_idx,
-                        jnp.array([manipulability_weight] * kin.num_actuated_joints),
-                    ),
-                )
+        factors.extend(
+            RobotFactors.manipulability_cost_factors(
+                JointVar,
+                0,
+                kin,
+                target_joint_indices,
+                manipulability_weight,
             )
+        )
 
     if robot_coll is not None:
-        factors.append(
-            jaxls.Factor(
-                RobotFactors.self_coll_cost,
-                (
-                    kin,
-                    robot_coll,
-                    JointVar(0),
-                    0.01,
-                    jnp.full(robot_coll.coll.get_batch_axes(), self_coll_weight),
-                    ConstrainedSE3Var(0),
-                ),
-            ),
+        # factors.extend(
+        #     RobotFactors.self_coll_factors(
+        #         JointVar,
+        #         0,
+        #         kin,
+        #         robot_coll,
+        #         0.01,
+        #         jnp.full((len(robot_coll.self_coll_list),), self_coll_weight),
+        #     )
+        # )
+        activation_dist_arr = robot_coll.make_world_coll_params(
+            0.1,
+            {
+                k: 0.01
+                for k in [
+                    "panda_leftfinger",
+                    "panda_rightfinger",
+                ]
+            },
         )
         for world_coll in world_coll_list:
-            factors.append(
-                jaxls.Factor(
-                    RobotFactors.world_coll_cost,
-                    (
-                        kin,
-                        robot_coll,
-                        JointVar(0),
-                        world_coll,
-                        jnp.array([0.01]),
-                        jnp.full(robot_coll.coll.get_batch_axes(), world_coll_weight),
-                        ConstrainedSE3Var(0),
-                    ),
-                ),
+            factors.extend(
+                RobotFactors.get_world_coll_factors(
+                    JointVar,
+                    0,
+                    kin,
+                    robot_coll,
+                    world_coll,
+                    activation_dist_arr,
+                    weights=jnp.full((len(activation_dist_arr),), world_coll_weight),
+                    base_tf_var=ConstrainedSE3Var(0),
+                )
             )
 
     graph = jaxls.FactorGraph.make(
@@ -215,6 +211,9 @@ def solve_ik(
 
 
 if __name__ == "__main__":
+    # Set device to cpu.
+    # jax.config.update("jax_platform_name", "cpu")
+
     urdf = load_urdf("panda")
     urdf = lock_joints(
         urdf,
@@ -227,7 +226,8 @@ if __name__ == "__main__":
     coll = RobotColl.from_urdf(urdf)
     
     # obj_mesh = trimesh.load(Path(__file__).parent / "assets/ycb_power_drill.obj")
-    obj_mesh = trimesh.load(Path(__file__).parent / "assets/ycb_cracker_box.obj")
+    # obj_mesh = trimesh.load(Path(__file__).parent / "assets/ycb_cracker_box.obj")
+    obj_mesh = trimesh.load(Path(__file__).parent / "assets/ycb/textured.obj")
     assert isinstance(obj_mesh, trimesh.Trimesh)
     obj = Convex.from_mesh(obj_mesh)
     
@@ -275,7 +275,7 @@ if __name__ == "__main__":
             kin,
             target_poses,
             target_joint_indices,
-            rest_pose,
+            joints,
             robot_coll=coll,
             world_coll_list=[curr_sphere_obs],
             pos_weight=10,
