@@ -47,7 +47,13 @@ class RSRDObject:
     def from_data(
         data_path: Path,
         prng_key: jax.Array,
+        *,
+        make_assignments: bool = True,
+        make_grasps: bool = True,
         max_grasps_per_part: int = 20,
+        min_width: float = 0.005,
+        max_width: float = 0.05,
+        max_depth: float = 0.08,
         nms_angle: float = jnp.pi / 8,
         nms_distance: float = 0.005,
     ) -> RSRDObject:
@@ -84,31 +90,44 @@ class RSRDObject:
             ns_to_world_scale,
         )
 
-        start = time.time()
-        single_hand_assignments = _self.rank_parts_to_move_single(data)
-        bimanual_assignments = _self.rank_parts_to_move_bimanual(data)
-        logger.info(f"Ranking took {time.time() - start:.2f} seconds.")
+        if make_assignments:
+            start = time.time()
+            single_hand_assignments = _self.rank_parts_to_move_single(data)
+            bimanual_assignments = _self.rank_parts_to_move_bimanual(data)
+            logger.info(f"Ranking took {time.time() - start:.2f} seconds.")
+        else:
+            single_hand_assignments = None
+            bimanual_assignments = None
 
-        start = time.time()
-        grasp_list = []
-        for group_idx in range(_self.num_groups):
-            part = _self.get_part(group_idx)
-            convex = trimesh.PointCloud(part.means).convex_hull
-            grasps = AntipodalGrasps.from_sample_mesh(convex, prng_key=prng_key)
-            grasps = grasps.nms(nms_distance, nms_angle)
-            grasps = jax.tree.map(
-                lambda x: (
-                    jnp.pad(
-                        x[:max_grasps_per_part],
-                        ((0, max(0, max_grasps_per_part - x.shape[0])), (0, 0)),
-                        mode="edge",
-                    )
-                ),
-                grasps,
-            )
-            grasp_list.append(grasps)
-        grasps = jax.tree.map(lambda *x: jnp.stack(x), *grasp_list)
-        logger.info(f"Grasp generation took {time.time() - start:.2f} seconds.")
+        if make_grasps:
+            start = time.time()
+            grasp_list = []
+            for group_idx in range(_self.num_groups):
+                part = _self.get_part(group_idx)
+                convex = trimesh.PointCloud(part.means).convex_hull
+                grasps = AntipodalGrasps.from_sample_mesh(
+                    convex,
+                    prng_key=prng_key,
+                    min_width=min_width,
+                    max_width=max_width,
+                    max_depth=max_depth,
+                )
+                grasps = grasps.nms(nms_distance, nms_angle)
+                grasps = jax.tree.map(
+                    lambda x: (
+                        jnp.pad(
+                            x[:max_grasps_per_part],
+                            ((0, max(0, max_grasps_per_part - x.shape[0])), (0, 0)),
+                            mode="edge",
+                        )
+                    ),
+                    grasps,
+                )
+                grasp_list.append(grasps)
+            grasps = jax.tree.map(lambda *x: jnp.stack(x), *grasp_list)
+            logger.info(f"Grasp generation took {time.time() - start:.2f} seconds.")
+        else:
+            grasps = None
 
         with jdc.copy_and_mutate(_self, validate=False) as _self:
             _self.single_hand_assignments = single_hand_assignments
@@ -193,7 +212,10 @@ class RSRDObject:
 
         num_timesteps = len(hands_info)
         num_parts = max(self.group_labels) + 1
-        sum_dist_parts = [onp.zeros((num_timesteps, num_parts))] * 2
+        sum_dist_parts = [
+            onp.zeros((num_timesteps, num_parts)),
+            onp.zeros((num_timesteps, num_parts)),
+        ]
 
         for timestep, (l_hand, r_hand) in hands_info.items():
             tstep = int(timestep)
@@ -228,9 +250,9 @@ class RSRDObject:
                     thumb *= self._ns_to_world_scale
 
                     d_pointer = (
-                        jnp.linalg.norm(pointer - part_means, axis=1).min().item()
+                        jnp.linalg.norm(pointer - part_means, axis=-1).min().item()
                     )
-                    d_thumb = jnp.linalg.norm(thumb - part_means, axis=1).min().item()
+                    d_thumb = jnp.linalg.norm(thumb - part_means, axis=-1).min().item()
                     sum_dist_parts[hand_idx][tstep, part_idx] = (
                         d_pointer + d_thumb
                     ) / 2
@@ -297,3 +319,6 @@ class RSRDVisualizer:
             self.part_delta_frames[group_idx].wxyz = onp.array(
                 jaxlie.SE3(group_delta).rotation().wxyz
             )
+
+    def get_part_frame_name(self, group_idx: int) -> str:
+        return f"/object/group_{group_idx}/delta/"

@@ -220,7 +220,6 @@ class AntipodalGrasps:
         )
         y_axes = jnp.cross(x_axes, delta)
         y_axes = y_axes / (jnp.linalg.norm(y_axes, axis=-1, keepdims=True) + 1e-6)
-        assert jnp.isclose(x_axes, y_axes).all(axis=-1).sum() == 0
 
         z_axes = jnp.cross(x_axes, y_axes)
 
@@ -231,9 +230,6 @@ class AntipodalGrasps:
         elif along_axis == "z":
             rotmat = jnp.stack([y_axes, z_axes, x_axes], axis=-1)
 
-        assert jnp.isnan(rotmat).sum() == 0
-
-        # Use the axis-angle representation to create the rotation matrix.
         return jaxlie.SE3.from_rotation_and_translation(
             jaxlie.SO3.from_matrix(rotmat), self.centers
         )

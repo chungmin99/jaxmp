@@ -175,7 +175,7 @@ def solve_ik(
         )
         for world_coll in world_coll_list:
             factors.extend(
-                RobotFactors.get_world_coll_factors(
+                RobotFactors.world_coll_factors(
                     JointVar,
                     0,
                     kin,

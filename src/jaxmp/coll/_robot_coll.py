@@ -58,6 +58,7 @@ class RobotColl:
         coll_handler: Callable[
             [Sequence[trimesh.Trimesh]], CollGeom | Sequence[CollGeom]
         ] = _capsules_from_meshes,
+        world_coll_ignore: Optional[list[str]] = None,
         self_coll_ignore: Optional[list[tuple[str, str]]] = None,
         ignore_immediate_parent: bool = True,
     ):
@@ -91,6 +92,9 @@ class RobotColl:
         for joint_idx, joint in enumerate(urdf.joint_map.values()):
             curr_link = joint.child
             assert curr_link in urdf.link_map
+
+            if curr_link in world_coll_ignore:
+                continue
 
             coll_link = RobotColl._get_coll_links(urdf, curr_link)
             if len(coll_link) == 0:

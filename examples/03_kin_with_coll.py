@@ -245,7 +245,7 @@ def solve_ik_with_coll(
         JointVar, joint_var_idx, kin, robot_coll, 0.05, self_coll_weight
     )
     world_coll_factors = [
-        RobotFactors.get_world_coll_factors(
+        RobotFactors.world_coll_factors(
             JointVar, joint_var_idx, kin, robot_coll, coll, 0.1, world_coll_weight
         )
         for coll in world_coll

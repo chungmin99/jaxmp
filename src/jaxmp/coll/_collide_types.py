@@ -144,6 +144,24 @@ class Sphere(CollGeom):
             center,
         )
         return Sphere(pose=pose, size=size)
+    
+    @staticmethod
+    def from_min_sphere(mesh: trimesh.Trimesh) -> Sphere:
+        """
+        Approximate a minimum bounding sphere for a mesh.
+        """
+        import trimesh.nsphere
+
+        center, radius = trimesh.nsphere.minimum_nsphere(mesh)
+
+        tf = jaxlie.SE3.from_translation(center)
+
+        cap = Sphere.from_center_and_radius(
+            center=jnp.array(tf.translation()),
+            radius=jnp.array([radius]),
+        )
+
+        return cap
 
     def _create_one_mesh(self, pos: jax.Array, mat: jax.Array, size: jax.Array):
         sphere = trimesh.creation.icosphere(radius=size[0].item())

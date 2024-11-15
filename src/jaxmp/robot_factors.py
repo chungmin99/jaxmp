@@ -48,7 +48,7 @@ class RobotFactors:
 
         class ConstrainedSE3Var(
             jaxls.Var[jaxlie.SE3],
-            default_factory=lambda: jaxlie.SE3.identity(),
+            default_factory=jaxlie.SE3.identity,
             tangent_dim=jaxlie.SE3.tangent_dim,
             retract_fn=retract_fn,
         ): ...
@@ -169,9 +169,9 @@ class RobotFactors:
         var_idx: jax.Array | int,
         kin: JaxKinTree,
         dt: float,
-        weights: Array,
+        weights: Array | float,
         prev_cfg: Optional[Array] = None,
-        prev_var_idx: Optional[jax.Array] = None,
+        prev_var_idx: Optional[jax.Array | int] = None,
     ) -> jaxls.Factor:
         """Joint limit velocity cost."""
 
@@ -195,6 +195,9 @@ class RobotFactors:
             var_prev = prev_cfg
         else:
             raise ValueError("Either prev_cfg or prev_var_idx must be provided.")
+        
+        if isinstance(weights, float) or isinstance(weights, int):
+            weights = jnp.full((kin.num_actuated_joints,), weights)
 
         return jaxls.Factor(
             vel_limit_cost,
@@ -292,7 +295,7 @@ class RobotFactors:
         ]
 
     @staticmethod
-    def get_world_coll_factors(
+    def world_coll_factors(
         JointVarType: type[jaxls.Var[Array]],
         joint_idx: jax.Array | int,
         kin: JaxKinTree,
