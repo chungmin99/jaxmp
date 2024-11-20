@@ -16,8 +16,8 @@ import jaxlie
 import numpy as onp
 
 from jaxmp import JaxKinTree, RobotFactors
-from jaxmp.extras.urdf_loader import load_urdf
-from jaxmp.extras.solve_ik import solve_ik
+from jaxmp.extras._urdf_loader import load_urdf
+from jaxmp.extras._solve_ik import solve_ik
 
 try:
     import sksparse

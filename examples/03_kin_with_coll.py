@@ -22,7 +22,7 @@ import viser.extras
 
 from jaxmp import JaxKinTree, RobotFactors
 from jaxmp.coll import Plane, RobotColl, Sphere, CollGeom
-from jaxmp.extras.urdf_loader import load_urdf
+from jaxmp.extras._urdf_loader import load_urdf
 
 
 def main(
