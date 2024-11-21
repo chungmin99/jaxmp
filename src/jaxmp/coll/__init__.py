@@ -9,3 +9,5 @@ from ._collide_types import Ellipsoid as Ellipsoid
 from ._collide_types import Convex as Convex
 from ._collide_types import Cylinder as Cylinder
 from ._robot_coll import RobotColl as RobotColl
+from ._robot_coll import link_to_capsules as link_to_capsules
+from ._robot_coll import link_to_spheres as link_to_spheres

@@ -173,7 +173,9 @@ def collide(
 
 def _get_coll_func(geom_0, geom_1) -> tuple[Callable, CollGeom, CollGeom]:
     for key, func in _COLLISION_FUNC.items():
-        if key[0] not in MJX_TO_COLL or key[1] not in MJX_TO_COLL:
+        if (key[0] not in MJX_TO_COLL or key[1] not in MJX_TO_COLL) or (
+            key[1] not in MJX_TO_COLL or key[0] not in MJX_TO_COLL
+        ):
             continue
         if isinstance(geom_0, MJX_TO_COLL[key[0]]) and isinstance(
             geom_1, MJX_TO_COLL[key[1]]
