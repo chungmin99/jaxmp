@@ -204,6 +204,21 @@ class Capsule(CollGeom):
         capsule.vertices = trimesh.transform_points(capsule.vertices, tf)
         return capsule
 
+    def decompose_to_spheres(self, n_segments: int) -> Sphere:
+        """Turn capsule of shape (*batch) to (n_segments, *batch) spheres."""
+        radii = self.size[..., 0:1]
+        heights = self.size[..., 1:2]
+
+        spheres = Sphere.from_center_and_radius(
+            jnp.broadcast_to(jnp.zeros(3), (*radii.shape[:-1], 3)), radii
+        )
+        offset = (heights - radii) * jnp.array([[0, 0, 1]])
+        offset = offset * jnp.broadcast_to(jnp.linspace(-1, 1, n_segments)[:, None], (n_segments, *offset.shape[1:]))
+        tf = self.pose @ jaxlie.SE3.from_translation(offset)
+
+        spheres = spheres.transform(tf)
+        return spheres
+
 
 @jdc.pytree_dataclass
 class Ellipsoid(CollGeom):

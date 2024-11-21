@@ -20,13 +20,67 @@ from jaxtyping import Float, Int
 import jax_dataclasses as jdc
 
 from jaxmp.kinematics import JaxKinTree
-from jaxmp.coll._collide_types import Capsule, CollGeom, Convex
+from jaxmp.coll._collide_types import Capsule, Sphere, CollGeom, Convex
 from jaxmp.coll._collide import collide
 
 
-def _capsules_from_meshes(meshes: Sequence[trimesh.Trimesh]) -> Capsule:
+def link_to_capsules(
+    meshes: Sequence[trimesh.Trimesh],
+    link_joint_idx: jax.Array,
+    link_to_colls: dict[int, jax.Array],
+) -> tuple[Capsule, jax.Array, dict[int, jax.Array]]:
     capsules = [Capsule.from_min_cylinder(mesh) for mesh in meshes]
-    return jax.tree.map(lambda *args: jnp.stack(args), *capsules)
+    return (
+        jax.tree.map(lambda *args: jnp.stack(args), *capsules),
+        link_joint_idx,
+        link_to_colls,
+    )
+
+
+def link_to_spheres(
+    meshes: Sequence[trimesh.Trimesh],
+    link_joint_idx: jax.Array,
+    link_to_colls: dict[int, jax.Array],
+    n_segments: int = 5,
+) -> tuple[Sphere, jax.Array, dict[int, jax.Array]]:
+    """
+    Convert a list of meshes to a list of spheres, given capsule decomposition.
+    This would be useful for collision detection along time, where each sphere at T and T+1 is connected.
+    """
+    capsules = [Capsule.from_min_cylinder(mesh) for mesh in meshes]
+
+    num_spheres = 0
+    spheres = []
+
+    _link_joint_idx = []
+    _link_to_colls = {link_idx: [] for link_idx in link_to_colls}
+
+    coll_to_link = {
+        coll_idx.item(): link_idx
+        for link_idx, colls in link_to_colls.items()
+        for coll_idx in colls
+    }
+
+    for idx, (joint_idx, cap) in enumerate(zip(link_joint_idx, capsules)):
+        sph = cap.decompose_to_spheres(n_segments=n_segments)
+        assert len(sph.get_batch_axes()) == 1
+        sph_len = sph.get_batch_axes()[0]
+
+        link_idx = coll_to_link[idx]
+        _link_joint_idx.extend([joint_idx] * sph_len)
+        _link_to_colls[link_idx].extend(range(num_spheres, num_spheres + sph_len))
+        spheres.append(sph)
+
+        num_spheres += sph_len
+
+    _link_to_colls = {k: jnp.array(v) for k, v in _link_to_colls.items()}
+
+    # update link_joint_idx
+    return (
+        jax.tree.map(lambda *args: jnp.concatenate(args, axis=0), *spheres),
+        jnp.array(_link_joint_idx),
+        _link_to_colls,
+    )
 
 
 @jdc.pytree_dataclass
@@ -55,9 +109,10 @@ class RobotColl:
     @staticmethod
     def from_urdf(
         urdf: yourdfpy.URDF,
-        coll_handler: Callable[
-            [Sequence[trimesh.Trimesh]], CollGeom | Sequence[CollGeom]
-        ] = _capsules_from_meshes,
+        create_coll_bodies: Callable[
+            [Sequence[trimesh.Trimesh], jax.Array, dict[int, jax.Array]],
+            tuple[CollGeom | Sequence[CollGeom], jax.Array, dict[int, jax.Array]],
+        ] = link_to_spheres,
         self_coll_ignore: Optional[list[tuple[str, str]]] = None,
         ignore_immediate_parent: bool = True,
     ):
@@ -116,12 +171,14 @@ class RobotColl:
         assert len(coll_link_meshes) > 0, "No collision links found in URDF."
         logger.info("Found {} collision bodies", len(coll_link_meshes))
 
-        coll_links = coll_handler(coll_link_meshes)
+        link_joint_idx = jnp.array(link_joint_idx)
+        coll_links, link_joint_idx, link_to_colls = create_coll_bodies(
+            coll_link_meshes, link_joint_idx, link_to_colls
+        )
         if isinstance(coll_links, CollGeom):
             assert len(coll_links.get_batch_axes()) == 1
 
         num_colls = len(link_joint_idx)
-        link_joint_idx = jnp.array(link_joint_idx)
         link_names = tuple[str](link_names)
 
         self_coll_list = RobotColl.create_self_coll_list(
