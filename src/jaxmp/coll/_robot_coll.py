@@ -106,13 +106,16 @@ class RobotColl:
     self_coll_list: jdc.Static[Sequence[tuple[int, int]]]
     """Collision matrix, where we store the list of colliding links."""
 
+    self_coll_mat: jdc.Static[jax.Array]
+    """Collision matrix, where we store the list of colliding collision bodies."""
+
     @staticmethod
     def from_urdf(
         urdf: yourdfpy.URDF,
         create_coll_bodies: Callable[
             [Sequence[trimesh.Trimesh], jax.Array, dict[int, jax.Array]],
             tuple[CollGeom | Sequence[CollGeom], jax.Array, dict[int, jax.Array]],
-        ] = link_to_spheres,
+        ] = link_to_capsules,
         self_coll_ignore: Optional[list[tuple[str, str]]] = None,
         ignore_immediate_parent: bool = True,
     ):
@@ -185,6 +188,9 @@ class RobotColl:
             link_names,
             self_coll_ignore,
         )
+        self_coll_mat = RobotColl.self_coll_list_to_matrix(
+            num_colls, self_coll_list, link_to_colls
+        )
 
         return RobotColl(
             num_colls=num_colls,
@@ -193,6 +199,7 @@ class RobotColl:
             link_joint_idx=link_joint_idx,
             link_to_colls=link_to_colls,
             self_coll_list=self_coll_list,
+            self_coll_mat=self_coll_mat,
         )
 
     @staticmethod
@@ -295,6 +302,27 @@ class RobotColl:
                     coll_list.append((i, j))
         return coll_list
 
+    @staticmethod
+    def self_coll_list_to_matrix(num_colls, self_coll_list, link_to_colls) -> jax.Array:
+        """Convert the self-collision list (specified in links) to a matrix (in collbodies)."""
+        # Create a matrix of size (num_colls, num_colls)
+        matrix = jnp.zeros((num_colls, num_colls))
+        
+        # For each pair of links in self_coll_list
+        for link_0, link_1 in self_coll_list:
+            # Get the collision bodies for each link
+            colls_0 = link_to_colls[link_0]
+            colls_1 = link_to_colls[link_1]
+            
+            # For each pair of collision bodies
+            for c0 in colls_0:
+                for c1 in colls_1:
+                    # Mark both directions in the matrix
+                    matrix = matrix.at[c0, c1].set(1.0)
+                    matrix = matrix.at[c1, c0].set(1.0)
+            
+        return matrix
+
     def at_joints(
         self, kin: JaxKinTree, cfg: Float[jax.Array, "*batch joints"]
     ) -> Float[CollGeom, "*batch links"] | Sequence[CollGeom]:
@@ -321,9 +349,8 @@ class RobotColl:
             dist = collide(
                 coll.reshape(*batch_size, 1, -1), coll.reshape(*batch_size, -1, 1)
             ).dist
-            coll_list = jnp.array(self.self_coll_list)
-            dist = dist[..., coll_list[:, 0], coll_list[:, 1]]
-            dist = dist.min(axis=-1)
+            dist = dist * self.self_coll_mat
+            dist = dist.min(axis=(-2, -1))
             assert dist.shape == batch_size
             return dist
         else:

@@ -152,6 +152,12 @@ class Sphere(CollGeom):
         sphere.vertices = trimesh.transform_points(sphere.vertices, tf)
         return sphere
 
+    def merge_to_cylinder(self) -> Cylinder:
+        """
+        Given sphere of shape (*batch) == (2, *_batch), merge to a cylinder of shape (*_batch).
+        """
+        raise NotImplementedError
+
 
 @jdc.pytree_dataclass
 class Capsule(CollGeom):
@@ -212,8 +218,10 @@ class Capsule(CollGeom):
         spheres = Sphere.from_center_and_radius(
             jnp.broadcast_to(jnp.zeros(3), (*radii.shape[:-1], 3)), radii
         )
-        offset = (heights - radii) * jnp.array([[0, 0, 1]])
-        offset = offset * jnp.broadcast_to(jnp.linspace(-1, 1, n_segments)[:, None], (n_segments, *offset.shape[1:]))
+        offset = heights * jnp.array([[0, 0, 1]])
+        offset = offset * jnp.broadcast_to(
+            jnp.linspace(-1, 1, n_segments)[:, None], (n_segments, *offset.shape[1:])
+        )
         tf = self.pose @ jaxlie.SE3.from_translation(offset)
 
         spheres = spheres.transform(tf)
