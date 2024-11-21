@@ -307,20 +307,20 @@ class RobotColl:
         """Convert the self-collision list (specified in links) to a matrix (in collbodies)."""
         # Create a matrix of size (num_colls, num_colls)
         matrix = jnp.zeros((num_colls, num_colls))
-        
+
         # For each pair of links in self_coll_list
         for link_0, link_1 in self_coll_list:
             # Get the collision bodies for each link
             colls_0 = link_to_colls[link_0]
             colls_1 = link_to_colls[link_1]
-            
+
             # For each pair of collision bodies
             for c0 in colls_0:
                 for c1 in colls_1:
                     # Mark both directions in the matrix
                     matrix = matrix.at[c0, c1].set(1.0)
                     matrix = matrix.at[c1, c0].set(1.0)
-            
+
         return matrix
 
     def at_joints(

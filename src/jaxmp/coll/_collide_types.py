@@ -23,6 +23,17 @@ from mujoco.mjx._src.types import ConvexMesh
 from mujoco.mjx._src.mesh import _get_face_norm, _get_edge_normals
 
 
+def make_frame(direction: jax.Array) -> jax.Array:
+    """Make a frame from a direction vector, aligning the z-axis with the direction."""
+    # Based on `mujoco.mjx._src.math.make_frame`.
+    direction = direction / (jnp.linalg.norm(direction) + 1e-6)
+    y, z = jnp.array([0, 1, 0]), jnp.array([0, 0, 1])
+    normal = jnp.where((-0.5 < direction[..., 1]) & (direction[..., 1] < 0.5), y, z)
+    normal = normal - direction * jnp.dot(direction, normal)
+    normal = normal / (jnp.linalg.norm(normal) + 1e-6)
+    return jnp.stack([jnp.cross(normal, direction), normal, direction], axis=-1)
+
+
 @jdc.pytree_dataclass
 class CollGeom(abc.ABC):
     pose: Float[jaxlie.SE3, "*batch 7"]  # SE3.
@@ -93,7 +104,7 @@ class Plane(CollGeom):
         batch_axes = point.shape[:-1]
         assert point.shape[-1] == 3
 
-        mat = Plane._normal_to_SO3(normal)
+        mat = make_frame(normal)
         assert mat.shape[:-2] == batch_axes
 
         size = jnp.zeros(batch_axes + (3,))
@@ -102,19 +113,6 @@ class Plane(CollGeom):
             point,
         )
         return Plane(pose=pose, size=size)
-
-    @staticmethod
-    def _normal_to_SO3(normal: jax.Array) -> jax.Array:
-        # Align z-axis with normal.
-        delta = normal + (
-            jnp.sign(normal[..., 0] + 1e-6)[..., None]
-            * jnp.roll(normal, shift=1, axis=-1)
-        )
-        x_axes = jnp.cross(normal, delta)
-        x_axes = x_axes / (jnp.linalg.norm(x_axes, axis=-1, keepdims=True) + 1e-6)
-        assert jnp.isclose(normal, x_axes).all(axis=-1).sum() == 0
-        y_axes = jnp.cross(normal, x_axes)
-        return jnp.stack([x_axes, y_axes, normal], axis=-1)
 
     def _create_one_mesh(self, pos: jax.Array, mat: jax.Array, size: jax.Array):
         plane = trimesh.creation.box(extents=[5, 5, 0.001])
@@ -151,12 +149,6 @@ class Sphere(CollGeom):
         tf[:3, 3] = pos
         sphere.vertices = trimesh.transform_points(sphere.vertices, tf)
         return sphere
-
-    def merge_to_cylinder(self) -> Cylinder:
-        """
-        Given sphere of shape (*batch) == (2, *_batch), merge to a cylinder of shape (*_batch).
-        """
-        raise NotImplementedError
 
 
 @jdc.pytree_dataclass
@@ -226,6 +218,26 @@ class Capsule(CollGeom):
 
         spheres = spheres.transform(tf)
         return spheres
+
+    @staticmethod
+    def from_sphere_pairs(sph_0: Sphere, sph_1: Sphere) -> Capsule:
+        """
+        Given spheres of shape (*batch), connect them with a capsule of shape (*batch).
+        """
+        assert sph_0.get_batch_axes() == sph_1.get_batch_axes()
+
+        radii = sph_0.size[..., 0:1]
+        height = jnp.linalg.norm(sph_1.pos - sph_0.pos, axis=-1, keepdims=True)
+        center = (sph_0.pos + sph_1.pos) / 2
+        rotation = jaxlie.SO3.from_matrix(make_frame(sph_1.pos - sph_0.pos))
+
+        capsule = Capsule.from_radius_and_height(
+            radius=radii,
+            height=height,
+            transform=jaxlie.SE3.from_rotation_and_translation(rotation, center),
+        )
+        assert capsule.get_batch_axes() == sph_0.get_batch_axes()
+        return capsule
 
 
 @jdc.pytree_dataclass

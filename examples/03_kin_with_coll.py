@@ -7,7 +7,6 @@ from pathlib import Path
 import time
 import jax
 import jaxls
-from jaxmp.coll import collide
 
 from loguru import logger
 import tyro
@@ -72,6 +71,7 @@ def main(
             "max. coll (world)", 0.0, step=0.01, disabled=True
         )
         visualize_coll = server.gui.add_checkbox("Visualize coll", False)
+
         @visualize_coll.on_update
         def _(_):
             if visualize_coll_sph.value and visualize_coll.value:
@@ -85,6 +85,7 @@ def main(
             "max. coll (world)", 0.0, step=0.01, disabled=True
         )
         visualize_coll_sph = server.gui.add_checkbox("Visualize coll", False)
+
         @visualize_coll_sph.on_update
         def _(_):
             if visualize_coll.value and visualize_coll_sph.value:
@@ -124,7 +125,7 @@ def main(
 
     has_jitted = False
     while True:
-        for (_visualize_coll, _robot_coll) in [
+        for _visualize_coll, _robot_coll in [
             (visualize_coll, robot_coll),
             (visualize_coll_sph, robot_coll_sph),
         ]:
@@ -146,6 +147,8 @@ def main(
                 collbody_handle.remove()
                 collbody_handle = None
 
+        time.sleep(0.1)
+        continue
         if len(target_name_handles) == 0:
             time.sleep(0.1)
             continue
@@ -197,7 +200,7 @@ def main(
             target_frame_handle.wxyz = onp.array(T_target_world)[:4]
 
         # Update collision distances.
-        for (_robot_coll, _self_coll_value, _world_coll_value) in [
+        for _robot_coll, _self_coll_value, _world_coll_value in [
             (robot_coll, self_coll_value, world_coll_value),
             (robot_coll_sph, self_coll_value_sph, world_coll_value_sph),
         ]:
