@@ -34,7 +34,9 @@ class SearchParams:
         ):
             del rng_key
 
-            state_next = state.apply_action(params.actions[action_idx], params.target_state)
+            state_next = state.apply_action(
+                params.actions[action_idx], params.target_state
+            )
             value = state_next.get_dist_heuristic(params.target_state)
             reward = value
             discount = jnp.where(state_next.n_steps > params.max_steps, 1.0, 0.0)
@@ -95,6 +97,7 @@ def step(params, start_state, prng_key):
     )
     return policy_output
 
+
 def main():
     n_dims = 2
     max_steps = 10
@@ -110,10 +113,10 @@ def main():
     start_state = SearchState.from_value(jnp.full([1, n_dims], 0, dtype=jnp.float32))
     # target_state = SearchState.from_value(jnp.full([1, n_dims], 1, dtype=jnp.float32))
     # [-0.16674091 -0.7618493   1.6530751   3.7709625  -1.5622753  -0.16651219]
-    target_state = SearchState.from_value(jnp.array([[
-        -0.16674091, -0.7618493, 1.6530751, 3.7709625, -1.5622753, -0.16651219
-    ]])
-
+    target_state = SearchState.from_value(
+        jnp.array(
+            [[-0.16674091, -0.7618493, 1.6530751, 3.7709625, -1.5622753, -0.16651219]]
+        )
     )
     assert start_state.n_dims == target_state.n_dims
     actions = jax.random.uniform(
@@ -131,7 +134,6 @@ def main():
     print("before", start_state.value)
     print("target", target_state.value)
     print()
-
 
     for n_step in range(100):
         print("Step", n_step)

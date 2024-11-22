@@ -1,7 +1,10 @@
-""" 05_path_planning.py
+"""05_path_planning.py
 Uses geometric path planning to find a path from start to goal.
 """
 
+from __future__ import annotations
+
+from typing import Optional
 from jaxmp.coll._collide_types import Capsule
 import viser
 from viser.extras import ViserUrdf
@@ -12,58 +15,45 @@ import numpy as onp
 import jaxlie
 import jax_dataclasses as jdc
 
-import mctx
-
 from jaxmp import JaxKinTree, RobotFactors
-from jaxmp.coll import RobotColl, Sphere, collide
+from jaxmp.coll import RobotColl
 from jaxmp.extras import load_urdf, solve_ik
 
-from jaxmp.path._mcts_types import SearchParams, SearchState
+from jaxmp.path._mcts_types import NodeState, NodeTransition, Search
 
-@jdc.jit
-def step(params, start_state, prng_key):
-    root = mctx.RootFnOutput(
-        prior_logits=jnp.zeros([1, params.n_actions]),
-        value=start_state.get_dist_heuristic(params.target_state),
-        embedding=start_state,
-    )
-    policy_output = mctx.gumbel_muzero_policy(
-        params=params,
-        rng_key=prng_key,
-        root=root,
-        recurrent_fn=params.get_recurrent_fn(),
-        num_simulations=10,
-        max_depth=params.max_steps,
-    )
-    return policy_output
 
-@jdc.jit
-def foo(params, start_state, prng_key, coll, kin, curr_sphere_obs):
-    def dist_fn(state, target):
-        dist_value = -jnp.linalg.norm(state.value - target.value, axis=-1)
-        coll_dist = (
-            coll.world_coll_dist(kin, state.value, curr_sphere_obs)
-            .min()
-            .clip(max=0.0)
-        )
-        return dist_value + coll_dist * 10
+@jdc.pytree_dataclass
+class JointState(NodeState[jnp.ndarray]):
+    def get_value(self, target: NodeState[jax.Array]) -> jax.Array:
+        return -jnp.linalg.norm(self.value - target.value)[None]
 
-    root = mctx.RootFnOutput(
-        prior_logits=jnp.zeros([1, params.n_actions]),
-        value=start_state.get_dist_heuristic(params.target_state),
-        embedding=start_state,
-    )
+    def apply_action(
+        self, action: jnp.ndarray, rng_key: Optional[jax.Array] = None
+    ) -> NodeState[jnp.ndarray]:
+        return JointState(self.value + action)
 
-    recurrent_fn = params.get_recurrent_fn(dist_fn)
-    policy_output = mctx.gumbel_muzero_policy(
-        params=params,
-        rng_key=prng_key,
-        root=root,
-        recurrent_fn=recurrent_fn,
-        num_simulations=100,
-        max_depth=params.max_steps,
-    )
-    return policy_output
+
+@jdc.pytree_dataclass
+class JointTransition(NodeTransition[jnp.ndarray]):
+    target_state: NodeState[jnp.ndarray]
+
+    @staticmethod
+    def from_actions_and_target(
+        actions: jnp.ndarray, target_state: NodeState[jnp.ndarray]
+    ) -> JointTransition:
+        return JointTransition(actions.shape[0], actions, target_state)
+
+    def get_transition(
+        self, state: NodeState[jnp.ndarray], action_idx: jax.Array
+    ) -> jnp.ndarray:
+        dist_from_target = jnp.abs(self.target_state.value - state.value)
+        return self.actions[action_idx] * dist_from_target
+    
+    def get_reward(
+        self, state: NodeState[jnp.ndarray], state_next: NodeState[jnp.ndarray], target: NodeState[jnp.ndarray]
+    ) -> jnp.ndarray:
+        return state_next.get_value(target) - state.get_value(target)
+
 
 def main():
     urdf = load_urdf("panda")
@@ -71,11 +61,12 @@ def main():
     coll = RobotColl.from_urdf(urdf)
     rest_joints = (kin.limits_upper + kin.limits_lower) / 2
     JointVar = RobotFactors.get_var_class(kin)
-    ik_weight = jnp.array([5.0]*3 + [1.0]*3)
-    
-    server = viser.ViserServer()
+    ik_weight = jnp.array([5.0] * 3 + [1.0] * 3)
 
-    curr_joints = rest_joints.copy()
+    # Initialize robots from the rest joints.
+    curr_joints = rest_joints
+
+    server = viser.ViserServer()
 
     # Robot being moved with IK.
     urdf_vis = ViserUrdf(server, urdf)
@@ -95,7 +86,9 @@ def main():
         "target_transform", scale=0.2
     )
 
-    sphere_obs = Capsule.from_radius_and_height(jnp.array([0.05]), jnp.array([2.0]), jaxlie.SE3.identity())
+    sphere_obs = Capsule.from_radius_and_height(
+        jnp.array([0.05]), jnp.array([2.0]), jaxlie.SE3.identity()
+    )
     # sphere_obs = Sphere.from_center_and_radius(jnp.zeros(3), jnp.array([0.05]))
     sphere_obs_handle = server.scene.add_transform_controls(
         "sphere_obs", scale=0.2, position=(0.2, 0.0, 0.2)
@@ -107,23 +100,16 @@ def main():
         n_actions = 30
 
         # Get the target joints.
-        target_joint_indices = jnp.array([kin.joint_names.index(target_name_handle.value)])
-        target_poses = jaxlie.SE3(jnp.array([*target_tf_handle.wxyz, *target_tf_handle.position]))
+        target_joint_indices = jnp.array(
+            [kin.joint_names.index(target_name_handle.value)]
+        )
+        target_poses = jaxlie.SE3(
+            jnp.array([*target_tf_handle.wxyz, *target_tf_handle.position])
+        )
         _, target_joints = solve_ik(
             kin, target_poses, target_joint_indices, target_joints, JointVar, ik_weight
         )
         urdf_vis.update_cfg(onp.array(target_joints))
-
-        start_state = SearchState.from_value(curr_joints[None])
-        target_state = SearchState.from_value(target_joints[None])
-
-        prng_key = jax.random.PRNGKey(0)
-        actions = jax.random.uniform(
-            prng_key, (n_actions, start_state.n_dims), minval=-1, maxval=1
-        )
-        params = SearchParams.from_target_and_actions(
-            target_state, actions, max_steps=10
-        )
 
         curr_sphere_obs = sphere_obs.transform(
             jaxlie.SE3(
@@ -131,23 +117,29 @@ def main():
             )
         )
 
-        policy_output = foo(params, start_state, prng_key, coll, kin, curr_sphere_obs)
+        start_state = JointState(curr_joints[None, ...])
+        target_state = JointState(target_joints[None, ...])
 
-        # Also do it along the path, not just the endpoints
-        # It is definitely doing tree search in a collision away manner
-        # Might be also nice to _plot_ the tree it plans!
-        start_state = start_state.apply_action(
-            actions[policy_output.action], params.target_state, increment_steps=False
-        ).value
-        next_joints = start_state[0]
-        # step = (next_joints - curr_joints)
-        # scale = (kin.joint_vel_limit * 0.1 / (jnp.abs(step) + 1e-6)).max().clip(min=-1.0, max=1.0)
-        # curr_joints = curr_joints + step * scale
-        curr_joints = next_joints
-        # somehow the values are also not clamped?
-        # Also there's nothing in the cost fn that says that we should pick the earliest action! There needs to be some discount
-        # print(curr_joints, target_joints, policy_output.action)
+        prng_key = jax.random.PRNGKey(0)
+        actions = jax.random.uniform(
+            prng_key, (n_actions, *curr_joints.shape), minval=-1, maxval=1
+        )
+        transitions = JointTransition.from_actions_and_target(actions, target_state)
+
+        action = Search.solve(
+            start_state,
+            target_state,
+            transitions,
+            prng_key,
+            max_depth=10,
+            num_simulations=100,
+        )
+        print(action)
+
+        curr_joints = start_state.apply_action(action).value[0]
+        print(curr_joints)
         urdf_vis_path.update_cfg(onp.array(curr_joints))
+
 
 if __name__ == "__main__":
     main()
