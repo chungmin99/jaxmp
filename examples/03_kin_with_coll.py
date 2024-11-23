@@ -21,7 +21,7 @@ import viser.extras
 
 from jaxmp import JaxKinTree, RobotFactors
 from jaxmp.coll import Plane, RobotColl, Sphere, CollGeom, link_to_spheres
-from jaxmp.extras.urdf_loader import load_urdf
+from jaxmp.extras import load_urdf
 
 
 def main(
@@ -147,8 +147,6 @@ def main(
                 collbody_handle.remove()
                 collbody_handle = None
 
-        time.sleep(0.1)
-        continue
         if len(target_name_handles) == 0:
             time.sleep(0.1)
             continue

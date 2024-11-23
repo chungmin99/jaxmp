@@ -5,6 +5,7 @@ Common types for formulating a tree-based path planning problem.
 """
 
 from __future__ import annotations
+from abc import abstractmethod, ABC
 from typing import Callable, Optional, cast
 
 import jax
@@ -23,13 +24,10 @@ type SearchParams[T] = tuple[NodeTransition[T], NodeState[T]]
 
 
 @jdc.pytree_dataclass
-class NodeState[T]:
+class NodeState[T](ABC):
     value: T
 
-    @staticmethod
-    def from_state(state: T) -> NodeState[T]:
-        return NodeState(state)
-
+    @abstractmethod
     def apply_action(
         self, action: T, rng_key: Optional[jax.Array] = None
     ) -> NodeState[T]:
@@ -38,27 +36,24 @@ class NodeState[T]:
 
 
 @jdc.pytree_dataclass
-class NodeTransition[T]:
+class NodeTransition[T](ABC):
     n_actions: jdc.Static[int]
     actions: T
 
-    @staticmethod
-    def from_actions(n_actions: int, actions: T) -> NodeTransition[T]:
-        # I need an "empty" action
-        return NodeTransition(n_actions, actions)
-
+    @abstractmethod
     def get_transition(self, state: NodeState[T], action_idx: jax.Array) -> T:
         """Get action to be applied to the current state."""
         raise NotImplementedError
 
-    def get_value(self, state: NodeState[T], action: T, target: NodeState[T]) -> jax.Array:
-        """Get value of the state-action pair, `V((s, a)| target)`."""
+    @abstractmethod
+    def get_transition_outputs(
+        self, state: NodeState[T], action: T, target: NodeState[T]
+    ) -> tuple[NodeState[T], jax.Array, jax.Array]:
         raise NotImplementedError
 
-    def get_reward(
-        self, state: NodeState[T], target: NodeState[T]
-    ) -> jax.Array:
-        """Get reward `r`."""
+    @abstractmethod
+    def get_empty_transition(self) -> T:
+        """Get a do-nothing transition."""
         raise NotImplementedError
 
 
@@ -94,8 +89,8 @@ class Search:
         num_simulations: int,
         prng_key: jax.Array,
     ) -> mctx.PolicyOutput:
-        value = transition.get_value(
-            start_state, target_state
+        _, value, _ = transition.get_transition_outputs(
+            start_state, transition.get_empty_transition(), target_state
         )
         root = mctx.RootFnOutput(
             prior_logits=jnp.zeros([1, transition.n_actions]),
@@ -109,6 +104,7 @@ class Search:
             recurrent_fn=Search._recurrent_fn,
             num_simulations=num_simulations,
             max_depth=max_depth,
+            gumbel_scale=0.5,
         )
         return policy_output
 
@@ -121,12 +117,11 @@ class Search:
     ) -> tuple[mctx.RecurrentFnOutput, NodeState[T]]:
         transition, target_state = search_params
         action = transition.get_transition(state, action_idx)
-        state_next = state.apply_action(action, rng_key)
-
-        value = transition.get_value(state, action, target_state)
-        reward = transition.get_reward(state, state_next, target_state)
+        state_next, value, reward = transition.get_transition_outputs(
+            state, action, target_state
+        )
         prior_logits = jnp.zeros((1, transition.n_actions))
-        discount = jnp.array([0.0])
+        discount = jnp.array([1.0])
 
         recurrent_fn_output = mctx.RecurrentFnOutput(
             reward=reward,
