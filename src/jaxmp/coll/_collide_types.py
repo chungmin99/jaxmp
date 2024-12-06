@@ -26,11 +26,30 @@ from mujoco.mjx._src.mesh import _get_face_norm, _get_edge_normals
 def make_frame(direction: jax.Array) -> jax.Array:
     """Make a frame from a direction vector, aligning the z-axis with the direction."""
     # Based on `mujoco.mjx._src.math.make_frame`.
+
+    is_zero = jnp.isclose(direction, 0.0).all(axis=-1, keepdims=True)
+    # direction = direction / (jnp.linalg.norm(direction) + 1e-6)
+    direction = jnp.where(
+        is_zero,
+        jnp.broadcast_to(jnp.array([1.0, 0.0, 0.0]), direction.shape),
+        direction
+    )
     direction = direction / (jnp.linalg.norm(direction) + 1e-6)
-    y, z = jnp.array([0, 1, 0]), jnp.array([0, 0, 1])
-    normal = jnp.where((-0.5 < direction[..., 1]) & (direction[..., 1] < 0.5), y, z)
-    normal = normal - direction * jnp.dot(direction, normal)
+    # x = direction
+    # x = jnp.where(is_zero, jnp.ones_like(x), x)
+    # n = jnp.linalg.norm(x, axis=-1, keepdims=True)
+    # n = jnp.where(is_zero, 0.0, n)
+    # direction = x / n
+
+    y = jnp.broadcast_to(jnp.array([0, 1, 0]), (*direction.shape[:-1], 3))
+    z = jnp.broadcast_to(jnp.array([0, 0, 1]), (*direction.shape[:-1], 3))
+
+    normal = jnp.where((-0.5 < direction[..., 1:2]) & (direction[..., 1:2] < 0.5), y, z)
+    normal = (
+        normal - direction * jnp.einsum("...i,...i->...", normal, direction)[..., None]
+    )
     normal = normal / (jnp.linalg.norm(normal) + 1e-6)
+
     return jnp.stack([jnp.cross(normal, direction), normal, direction], axis=-1)
 
 
@@ -163,6 +182,7 @@ class Capsule(CollGeom):
         segment = height / 2
         shape = jnp.concatenate([radius, segment, jnp.zeros_like(radius)], axis=-1)
         shape = jnp.broadcast_to(shape, batch_axes + (3,))
+        assert shape.shape[:-1] == transform.get_batch_axes()
 
         return Capsule(pose=transform, size=shape)
 
@@ -227,7 +247,35 @@ class Capsule(CollGeom):
         assert sph_0.get_batch_axes() == sph_1.get_batch_axes()
 
         radii = sph_0.size[..., 0:1]
-        height = jnp.linalg.norm(sph_1.pos - sph_0.pos, axis=-1, keepdims=True)
+
+        x = sph_1.pos - sph_0.pos
+        is_zero = jnp.allclose(x, 0.0)
+        x = jnp.where(is_zero, jnp.ones_like(x), x)
+        n = jnp.linalg.norm(x, axis=-1, keepdims=True)
+        n = jnp.where(is_zero, 0.0, n)
+        height = n
+
+        center = (sph_0.pos + sph_1.pos) / 2
+        rotation = jaxlie.SO3.from_matrix(make_frame(sph_1.pos - sph_0.pos))
+        transform = jaxlie.SE3.from_rotation_and_translation(rotation, center)
+
+        capsule = Capsule.from_radius_and_height(
+            radius=sph_0.size[..., 0:1],
+            height=height,
+            transform=transform,
+        )
+        return capsule
+
+        # height = jnp.linalg.norm(sph_1.pos - sph_0.pos, axis=-1, keepdims=True)
+
+        x = sph_1.pos - sph_0.pos
+        is_zero = jnp.allclose(x, 0.0)
+        # temporarily swap x with ones if is_zero, then swap back
+        x = jnp.where(is_zero, jnp.ones_like(x), x)
+        n = jnp.linalg.norm(x, axis=-1, keepdims=True)
+        # n = jnp.where(is_zero, 0.0, n)
+        height = n
+
         center = (sph_0.pos + sph_1.pos) / 2
         rotation = jaxlie.SO3.from_matrix(make_frame(sph_1.pos - sph_0.pos))
 

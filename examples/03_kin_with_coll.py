@@ -20,7 +20,7 @@ import viser
 import viser.extras
 
 from jaxmp import JaxKinTree, RobotFactors
-from jaxmp.coll import Plane, RobotColl, Sphere, CollGeom, link_to_spheres
+from jaxmp.coll import Plane, RobotColl, Sphere, CollGeom, link_to_spheres, Capsule
 from jaxmp.extras.urdf_loader import load_urdf
 
 
@@ -56,7 +56,12 @@ def main(
     )
 
     # Also add a movable sphere as an obstacle (world collision).
-    sphere_obs = Sphere.from_center_and_radius(jnp.zeros(3), jnp.array([0.05]))
+    # sphere_obs = Sphere.from_center_and_radius(jnp.zeros(3), jnp.array([0.05]))
+    sphere_obs = Capsule.from_radius_and_height(
+        radius=jnp.array([0.05]), 
+        height=jnp.array([2.0]), 
+        transform=jaxlie.SE3.from_translation(jnp.zeros(3))
+    )
     sphere_obs_handle = server.scene.add_transform_controls(
         "sphere_obs", scale=0.2, position=(0.2, 0.0, 0.2)
     )
@@ -147,8 +152,6 @@ def main(
                 collbody_handle.remove()
                 collbody_handle = None
 
-        time.sleep(0.1)
-        continue
         if len(target_name_handles) == 0:
             time.sleep(0.1)
             continue
@@ -272,7 +275,7 @@ def solve_ik_with_coll(
         JointVar, joint_var_idx, kin, robot_coll, 0.05, self_coll_weight
     )
     world_coll_factors = [
-        RobotFactors.get_world_coll_factors(
+        RobotFactors.world_coll_factors(
             JointVar, joint_var_idx, kin, robot_coll, coll, 0.1, world_coll_weight
         )
         for coll in world_coll
