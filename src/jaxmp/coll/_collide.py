@@ -64,7 +64,7 @@ class Collision:
 
 def colldist_from_sdf(
     _dist: jax.Array,
-    activation_dist: float = 0.05,
+    activation_dist: jax.Array | float = 0.05,
 ) -> jax.Array:
     """
     Convert a signed distance field to a collision distance field,

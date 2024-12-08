@@ -147,8 +147,6 @@ def main(
                 collbody_handle.remove()
                 collbody_handle = None
 
-        time.sleep(0.1)
-        continue
         if len(target_name_handles) == 0:
             time.sleep(0.1)
             continue
@@ -223,7 +221,7 @@ def solve_ik_with_coll(
     *,
     pos_weight: float = 5.0,
     rot_weight: float = 1.0,
-    rest_weight: float = 0.01,
+    rest_weight: float = 0.001,
     limit_weight: float = 100.0,
     self_coll_weight: float = 5.0,
     world_coll_weight: float = 10.0,
@@ -268,19 +266,18 @@ def solve_ik_with_coll(
     )
 
     # Add collision factors.
-    self_coll_factors = RobotFactors.self_coll_factors(
+    self_coll_factor = RobotFactors.self_coll_factor(
         JointVar, joint_var_idx, kin, robot_coll, 0.05, self_coll_weight
     )
     world_coll_factors = [
-        RobotFactors.get_world_coll_factors(
+        RobotFactors.world_coll_factor(
             JointVar, joint_var_idx, kin, robot_coll, coll, 0.1, world_coll_weight
         )
         for coll in world_coll
     ]
 
-    factors.extend(self_coll_factors)
-    for world_coll_factor in world_coll_factors:
-        factors.extend(world_coll_factor)
+    factors.append(self_coll_factor)
+    factors.extend(world_coll_factors)
 
     # Solve IK.
     joint_vars = [JointVar(joint_var_idx)]
