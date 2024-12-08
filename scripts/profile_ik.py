@@ -225,8 +225,8 @@ def solve_ik(
         joint_var_values.append(ConstrainedSE3Var(pose_var_idx))
 
     if include_self_coll:
-        factors.extend(
-            RobotFactors.self_coll_factors(
+        factors.append(
+            RobotFactors.self_coll_factor(
                 JointVar, joint_var_idx, kin, coll, 0.05, self_coll_weight
             )
         )
