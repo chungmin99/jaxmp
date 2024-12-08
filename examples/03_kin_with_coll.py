@@ -185,7 +185,7 @@ def main(
         # Update timing info.
         timing_handle.value = (time.time() - start) * 1000
         if not has_jitted:
-            logger.info("JIT compile + runing took {} ms.", timing_handle.value)
+            logger.info("JIT compile + running took {} ms.", timing_handle.value)
             has_jitted = True
 
         urdf_vis.update_cfg(onp.array(joints))
