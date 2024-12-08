@@ -27,10 +27,13 @@ def make_frame(direction: jax.Array) -> jax.Array:
     """Make a frame from a direction vector, aligning the z-axis with the direction."""
     # Based on `mujoco.mjx._src.math.make_frame`.
     direction = direction / (jnp.linalg.norm(direction) + 1e-6)
-    y, z = jnp.array([0, 1, 0]), jnp.array([0, 0, 1])
-    normal = jnp.where((-0.5 < direction[..., 1]) & (direction[..., 1] < 0.5), y, z)
-    normal = normal - direction * jnp.dot(direction, normal)
+    y = jnp.broadcast_to(jnp.array([0, 1, 0]), (*direction.shape[:-1], 3))
+    z = jnp.broadcast_to(jnp.array([0, 0, 1]), (*direction.shape[:-1], 3))
+
+    normal = jnp.where((-0.5 < direction[..., 1:2]) & (direction[..., 1:2] < 0.5), y, z)
+    normal = normal - direction * jnp.einsum('...i,...i->...', normal, direction)[..., None]
     normal = normal / (jnp.linalg.norm(normal) + 1e-6)
+
     return jnp.stack([jnp.cross(normal, direction), normal, direction], axis=-1)
 
 
