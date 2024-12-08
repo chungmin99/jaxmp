@@ -30,6 +30,11 @@ def link_to_capsules(
     link_to_colls: dict[int, jax.Array],
 ) -> tuple[Capsule, jax.Array, dict[int, jax.Array]]:
     capsules = [Capsule.from_min_cylinder(mesh) for mesh in meshes]
+    max_len_colls = max(len(colls) for colls in link_to_colls.values())
+    for link, colls in link_to_colls.items():
+        link_to_colls[link] = jnp.pad(
+            colls, (0, max_len_colls - len(colls)), "constant", constant_values=-1
+        )
     return (
         jax.tree.map(lambda *args: jnp.stack(args), *capsules),
         link_joint_idx,
@@ -74,6 +79,11 @@ def link_to_spheres(
         num_spheres += sph_len
 
     _link_to_colls = {k: jnp.array(v) for k, v in _link_to_colls.items()}
+    max_len_colls = max(len(colls) for colls in _link_to_colls.values())
+    for link, colls in _link_to_colls.items():
+        _link_to_colls[link] = jnp.pad(
+            colls, (0, max_len_colls - len(colls)), "constant", constant_values=-1
+        )
 
     # update link_joint_idx
     return (
@@ -317,6 +327,8 @@ class RobotColl:
             # For each pair of collision bodies
             for c0 in colls_0:
                 for c1 in colls_1:
+                    if c0 == -1 or c1 == -1:
+                        continue
                     # Mark both directions in the matrix
                     matrix = matrix.at[c0, c1].set(1.0)
                     matrix = matrix.at[c1, c0].set(1.0)
@@ -362,6 +374,8 @@ class RobotColl:
             for idx, (link_0, link_1) in enumerate(self.self_coll_list):
                 for coll_0 in self.link_to_colls[link_0]:
                     for coll_1 in self.link_to_colls[link_1]:
+                        if coll_0 == -1 or coll_1 == -1:
+                            continue
                         dist = collide(coll[coll_0], coll[coll_1]).dist
                         min_dist = min_dist.at[..., idx].set(
                             jnp.minimum(dist, min_dist[..., idx])
