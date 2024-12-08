@@ -20,7 +20,7 @@ import viser
 import viser.extras
 
 from jaxmp import JaxKinTree, RobotFactors
-from jaxmp.coll import Plane, RobotColl, Sphere, CollGeom, link_to_spheres
+from jaxmp.coll import Plane, RobotColl, Sphere, CollGeom, link_to_spheres, Capsule
 from jaxmp.extras.urdf_loader import load_urdf
 
 
@@ -56,7 +56,12 @@ def main(
     )
 
     # Also add a movable sphere as an obstacle (world collision).
-    sphere_obs = Sphere.from_center_and_radius(jnp.zeros(3), jnp.array([0.05]))
+    # sphere_obs = Sphere.from_center_and_radius(jnp.zeros(3), jnp.array([0.05]))
+    sphere_obs = Capsule.from_radius_and_height(
+        radius=jnp.array([0.05]), 
+        height=jnp.array([2.0]), 
+        transform=jaxlie.SE3.from_translation(jnp.zeros(3))
+    )
     sphere_obs_handle = server.scene.add_transform_controls(
         "sphere_obs", scale=0.2, position=(0.2, 0.0, 0.2)
     )
