@@ -56,8 +56,13 @@ class JaxKinTree:
     joint_vel_limit: Float[Array, " act_joints"]
     """Joint limit velocities for each actuated joint."""
 
+    unroll_fk: jdc.Static[bool]
+    """Whether to unroll the forward kinematics `fori_loop`.
+    Unrolling seems useful for collision-aware IK on GPU.
+    """
+
     @staticmethod
-    def from_urdf(urdf: yourdfpy.URDF) -> JaxKinTree:
+    def from_urdf(urdf: yourdfpy.URDF, unroll_fk: bool = False) -> JaxKinTree:
         """Build a differentiable robot model from a URDF."""
 
         # Get the parent indices + joint twist parameters.
@@ -137,6 +142,7 @@ class JaxKinTree:
             limits_upper=limits_upper,
             joint_names=joint_names,
             joint_vel_limit=joint_vel_limits,
+            unroll_fk=unroll_fk,
         )
 
     @staticmethod
@@ -278,6 +284,7 @@ class JaxKinTree:
             upper=self.num_joints,
             body_fun=compute_joint,
             init_val=Ts_world_parent,
+            unroll=self.unroll_fk,
         )
 
         assert Ts_world_joint.shape == (*batch_axes, self.num_joints, 7)
