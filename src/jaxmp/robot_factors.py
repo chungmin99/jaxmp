@@ -10,7 +10,7 @@ import jaxlie
 import jaxls
 
 from jaxmp.kinematics import JaxKinTree
-from jaxmp.coll import CollGeom, collide, colldist_from_sdf, RobotColl
+from jaxmp.coll import CollGeom, collide, colldist_from_sdf, RobotColl, Sphere, Capsule
 
 
 class RobotFactors:
@@ -171,7 +171,7 @@ class RobotFactors:
         dt: float,
         weights: Array,
         prev_cfg: Optional[Array] = None,
-        prev_var_idx: Optional[jax.Array] = None,
+        prev_var_idx: Optional[jax.Array | int] = None,
     ) -> jaxls.Factor:
         """Joint limit velocity cost."""
 
@@ -229,6 +229,7 @@ class RobotFactors:
         robot_coll: RobotColl,
         activation_dist: jax.Array | float,
         weights: jax.Array | float,
+        prev_var_idx: Optional[jax.Array | int] = None,
     ) -> jaxls.Factor:
         """Collision-scaled dist for self-collision.
         `activation_dist` and `weights` should be given in terms of the collision link pairs,
@@ -238,19 +239,32 @@ class RobotFactors:
         # jaxls does not support static/varying treedefs, for batching.
         def self_coll_cost(
             vals: jaxls.VarValues,
-            var: jaxls.Var[Array],
+            var_curr: jaxls.Var[Array],
+            var_prev: Optional[jaxls.Var[Array]],
             activation_dist: jax.Array,
             weights: jax.Array,
             indices_0: jax.Array,
             indices_1: jax.Array,
         ) -> Array:
-            joint_cfg = vals[var]
+            joint_cfg = vals[var_curr]
             colls = robot_coll.at_joints(kin, joint_cfg)
             assert isinstance(colls, CollGeom)
             coll_0 = colls.slice(..., indices_0)
             coll_1 = colls.slice(..., indices_1)
 
             sdf = collide(coll_0, coll_1).dist
+
+            if var_prev is not None:
+                assert isinstance(coll_0, Sphere)
+                assert isinstance(coll_1, Sphere)
+                prev_cfg = vals[var_prev]
+                prev_colls = robot_coll.at_joints(kin, prev_cfg)
+                assert isinstance(prev_colls, Sphere)
+                prev_coll_0 = prev_colls.slice(..., indices_0)
+                prev_coll_1 = prev_colls.slice(..., indices_1)
+                coll_0 = Capsule.from_sphere_pairs(prev_coll_0, coll_0)
+                coll_1 = Capsule.from_sphere_pairs(prev_coll_1, coll_1)
+
             return (
                 colldist_from_sdf(sdf, activation_dist=activation_dist) * weights
             ).flatten()
@@ -274,6 +288,7 @@ class RobotFactors:
             self_coll_cost,
             (
                 JointVarType(jnp.array([var_idx] * num_coll_factors)),
+                None if prev_var_idx is None else JointVarType(jnp.array([prev_var_idx] * num_coll_factors)),
                 activation_dist,
                 weights,
                 jnp.asarray(
@@ -302,17 +317,19 @@ class RobotFactors:
         activation_dist: float | jax.Array,
         weights: float | jax.Array,
         base_tf_var: jaxls.Var[jaxlie.SE3] | jaxlie.SE3 | None = None,
+        prev_var_idx: Optional[jax.Array | int] = None,
     ) -> jaxls.Factor:
         """Collision-scaled dist for world collision."""
 
         def world_coll_cost(
             vals: jaxls.VarValues,
-            var: jaxls.Var[Array],
+            var_curr: jaxls.Var[Array],
+            var_prev: Optional[jaxls.Var[Array]],
             eta: jax.Array,
             weights: jax.Array,
             coll_indices: jax.Array,
         ) -> Array:
-            joint_cfg = vals[var]
+            joint_cfg = vals[var_curr]
             if isinstance(base_tf_var, jaxls.Var):
                 base_tf = vals[base_tf_var]
             elif isinstance(base_tf_var, jaxlie.SE3):
@@ -323,6 +340,14 @@ class RobotFactors:
             coll = robot_coll.at_joints(kin, joint_cfg)
             assert isinstance(coll, CollGeom)
             coll = coll.slice(..., coll_indices).transform(base_tf)
+
+            if var_prev is not None:
+                assert isinstance(coll, Sphere)
+                prev_cfg = vals[var_prev]
+                prev_coll = robot_coll.at_joints(kin, prev_cfg)
+                assert isinstance(prev_coll, Sphere)
+                prev_coll = prev_coll.slice(..., coll_indices).transform(base_tf)
+                coll = Capsule.from_sphere_pairs(prev_coll, coll)
 
             sdf = collide(coll, other).dist
             return (colldist_from_sdf(sdf, activation_dist=eta) * weights).flatten()
@@ -346,6 +371,7 @@ class RobotFactors:
             world_coll_cost,
             (
                 JointVarType(jnp.array([joint_idx] * num_coll_factors)),
+                None if prev_var_idx is None else JointVarType(jnp.array([prev_var_idx] * num_coll_factors)),
                 activation_dist,
                 weights,
                 jnp.asarray(
