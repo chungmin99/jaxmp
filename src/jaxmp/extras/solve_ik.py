@@ -97,8 +97,8 @@ def solve_ik(
     )
 
     if use_manipulability:
-        factors.extend(
-            RobotFactors.manipulability_cost_factors(
+        factors.append(
+            RobotFactors.manipulability_cost_factor(
                 JointVar,
                 joint_var_idx,
                 kin,
