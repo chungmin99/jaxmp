@@ -144,8 +144,6 @@ def main(
     trajectory = onp.load(
         Path(__file__).parent / "assets/yumi_trajectory.npy", allow_pickle=True
     ).item()  # {'joint_name': [time, wxyz_xyz]}
-    for joint_name, joint_pose_traj in trajectory.items():
-        trajectory[joint_name] = joint_pose_traj[:10]
     timesteps = list(trajectory.values())[0].shape[0]
     rest_pose = (kin.limits_upper + kin.limits_lower) / 2
 
