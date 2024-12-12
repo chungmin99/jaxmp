@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 import jax
 from robot_descriptions.loaders.yourdfpy import load_robot_description
+from loguru import logger
 import viser
 import viser.extras
 
@@ -49,75 +50,67 @@ def solve_traj_gomp(
         retract_fn=retract_fn,
     ): ...
 
+    ik_weights = jnp.array([pos_weight] * 3 + [rot_weight] * 3)
+
     def ik_cost(
         vals: jaxls.VarValues,
-        kin: JaxKinTree,
         joint_var: jaxls.Var[jax.Array],
         target_pose: jaxlie.SE3,
         target_pose_offset_var: ConstrainedSE3Var,
-        target_joint_idx: jdc.Static[int],
-        weights: jax.Array,
     ) -> jax.Array:
         """Pose cost."""
         joint_cfg: jax.Array = vals[joint_var]
         target_pose_offset = vals[target_pose_offset_var]
         Ts_joint_world = kin.forward_kinematics(joint_cfg)
         residual = (
-            (jaxlie.SE3(Ts_joint_world[target_joint_idx])).inverse()
+            (jaxlie.SE3(Ts_joint_world[target_joint_indices])).inverse()
             @ (target_pose @ target_pose_offset)
         ).log()
-        weights = jnp.broadcast_to(weights, residual.shape)
-        assert residual.shape == weights.shape
-        return (residual * weights).flatten()
+        return (residual * ik_weights).flatten()
 
     _, timesteps, pose_dim = target_pose.wxyz_xyz.shape
+    target_pose = jaxlie.SE3(jnp.swapaxes(target_pose.wxyz_xyz, 0, 1))
     factors = []
 
-    for tstep in range(timesteps):
-        for idx, target_joint_idx in enumerate(target_joint_indices):
-            factors.extend(
-                [
-                    jaxls.Factor(
-                        ik_cost,
-                        (
-                            kin,
-                            JointVar(tstep),
-                            jaxlie.SE3(target_pose.wxyz_xyz[idx, tstep]),
-                            ConstrainedSE3Var(idx),
-                            target_joint_idx,
-                            jnp.array([pos_weight] * 3 + [rot_weight] * 3),
-                        ),
-                    ),
-                ]
-            )
-        factors.extend(
-            [
-                RobotFactors.limit_cost_factor(
-                    JointVar,
-                    tstep,
-                    kin,
-                    jnp.array([limit_weight] * kin.num_actuated_joints),
-                ),
-                RobotFactors.rest_cost_factor(
-                    JointVar,
-                    tstep,
-                    jnp.array([rest_weight] * kin.num_actuated_joints),
-                ),
-            ]
+    factors.append(
+        jaxls.Factor(
+            ik_cost,
+            (
+                JointVar(jnp.arange(timesteps)),
+                target_pose,
+                ConstrainedSE3Var(jnp.zeros((timesteps,))),
+            ),
+        ),
+    )
+
+    factors.extend(
+        [
+            RobotFactors.limit_cost_factor(
+                JointVar,
+                jnp.arange(timesteps),
+                kin,
+                jnp.array([limit_weight] * kin.num_actuated_joints),
+            ),
+            RobotFactors.rest_cost_factor(
+                JointVar,
+                jnp.arange(timesteps),
+                jnp.array([rest_weight] * kin.num_actuated_joints),
+            ),
+        ]
+    )
+
+    factors.append(
+        RobotFactors.smoothness_cost_factor(
+            JointVar,
+            jnp.arange(1, timesteps),
+            jnp.arange(0, timesteps - 1),
+            jnp.array([smoothness_weight] * kin.num_actuated_joints),
         )
-        if tstep > 0:
-            factors.append(
-                RobotFactors.smoothness_cost_factor(
-                    JointVar,
-                    tstep,
-                    tstep - 1,
-                    jnp.array([smoothness_weight] * kin.num_actuated_joints),
-                )
-            )
+    )
 
     traj_vars = [
         JointVar(jnp.arange(timesteps)),
-        ConstrainedSE3Var(jnp.arange(len(rest_pose))),
+        ConstrainedSE3Var(0),
     ]
     graph = jaxls.FactorGraph.make(
         factors,
@@ -126,10 +119,11 @@ def solve_traj_gomp(
     )
     solution = graph.solve(
         initial_vals=jaxls.VarValues.make(traj_vars),
-        trust_region=jaxls.TrustRegionConfig(lambda_initial=0.2),
+        trust_region=jaxls.TrustRegionConfig(lambda_initial=1.0),
         termination=jaxls.TerminationConfig(
             gradient_tolerance=1e-5, parameter_tolerance=1e-5
         ),
+        verbose=False,
     )
     return jnp.stack([solution[JointVar(tstep)] for tstep in range(timesteps)])
 
@@ -172,20 +166,6 @@ def main(
             axes_radius=0.004,
         )
 
-    freeze_target_xyz_xyz = jnp.ones(6)
-    traj = solve_traj_gomp(
-        kin,
-        target_pose,
-        target_joint_indices,
-        pos_weight=pos_weight,
-        rot_weight=rot_weight,
-        rest_weight=rest_weight,
-        limit_weight=limit_weight,
-        smoothness_weight=smoothness_weight,
-        rest_pose=rest_pose,
-        freeze_target_xyz_xyz=freeze_target_xyz_xyz,
-    )
-
     with server.gui.add_folder("Target frame"):
         freeze_target_x = server.gui.add_checkbox("Freeze x", initial_value=True)
         freeze_target_y = server.gui.add_checkbox("Freeze y", initial_value=True)
@@ -196,8 +176,7 @@ def main(
 
     update_traj_handle = server.gui.add_button("Regenerate traj")
 
-    @update_traj_handle.on_click
-    def _(_):
+    def generate_traj():
         nonlocal traj
         update_traj_handle.disabled = True
 
@@ -222,6 +201,7 @@ def main(
                 target_pose.wxyz_xyz[..., 4:] - traj_center
             )
         )
+        start = time.time()
         traj = solve_traj_gomp(
             kin,
             target_pose,
@@ -234,7 +214,14 @@ def main(
             rest_pose=rest_pose,
             freeze_target_xyz_xyz=freeze_target_xyz_xyz,
         )
+        end = time.time()
+        logger.info(f"Trajectory optimization took {end - start:.2f}s")
         update_traj_handle.disabled = False
+
+    update_traj_handle.on_click(lambda _: generate_traj())
+
+    traj = None
+    generate_traj()
 
     # Visualize!
     slider = server.gui.add_slider(
@@ -243,6 +230,7 @@ def main(
 
     @slider.on_update
     def _(_) -> None:
+        assert traj is not None
         urdf_orig.update_cfg(onp.array(traj[slider.value]))
 
         Ts_world_joint = onp.array(kin.forward_kinematics(traj[slider.value]))

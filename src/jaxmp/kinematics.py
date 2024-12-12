@@ -56,8 +56,13 @@ class JaxKinTree:
     joint_vel_limit: Float[Array, " act_joints"]
     """Joint limit velocities for each actuated joint."""
 
+    unroll_fk: jdc.Static[bool]
+    """Whether to unroll the forward kinematics `fori_loop`.
+    Unrolling seems useful for collision-aware IK on GPU.
+    """
+
     @staticmethod
-    def from_urdf(urdf: yourdfpy.URDF) -> JaxKinTree:
+    def from_urdf(urdf: yourdfpy.URDF, unroll_fk: bool = False) -> JaxKinTree:
         """Build a differentiable robot model from a URDF."""
 
         # Get the parent indices + joint twist parameters.
@@ -137,6 +142,7 @@ class JaxKinTree:
             limits_upper=limits_upper,
             joint_names=joint_names,
             joint_vel_limit=joint_vel_limits,
+            unroll_fk=unroll_fk,
         )
 
     @staticmethod
@@ -250,32 +256,37 @@ class JaxKinTree:
         Ts_joint_child = jaxlie.SE3.exp(self.joint_twists * cfg[..., None]).wxyz_xyz
         assert Ts_joint_child.shape == (*batch_axes, self.num_actuated_joints, 7)
 
+        Ts_joint_child = jnp.where(
+            (self.idx_actuated_joint == -1)[..., None],
+            jaxlie.SE3.identity().wxyz_xyz,
+            Ts_joint_child[..., self.idx_actuated_joint, :],
+        )
+        Ts_parent_child = (
+            jaxlie.SE3(self.Ts_parent_joint) @ jaxlie.SE3(Ts_joint_child)
+        ).wxyz_xyz
+
         def compute_joint(i: int, Ts_world_joint: Array) -> Array:
             T_world_parent = jnp.where(
                 self.idx_parent_joint[i] == -1,
-                jnp.broadcast_to(jaxlie.SE3.identity().wxyz_xyz, (*batch_axes, 7)),
+                jaxlie.SE3.identity().wxyz_xyz,
                 Ts_world_joint[..., self.idx_parent_joint[i], :],
             )
 
-            T_joint_child = jnp.where(
-                self.idx_actuated_joint[i] != -1,
-                Ts_joint_child[..., self.idx_actuated_joint[i], :],
-                jnp.broadcast_to(jaxlie.SE3.identity().wxyz_xyz, (*batch_axes, 7)),
-            )
             return Ts_world_joint.at[..., i, :].set(
                 (
-                    jaxlie.SE3(T_world_parent)
-                    @ jaxlie.SE3(self.Ts_parent_joint[i])
-                    @ jaxlie.SE3(T_joint_child)
+                    jaxlie.SE3(T_world_parent) @ jaxlie.SE3(Ts_parent_child[..., i, :])
                 ).wxyz_xyz
             )
 
+        Ts_world_parent = jnp.zeros((*batch_axes, self.num_joints, 7))
         Ts_world_joint = jax.lax.fori_loop(
             lower=0,
             upper=self.num_joints,
             body_fun=compute_joint,
-            init_val=jnp.zeros((*batch_axes, self.num_joints, 7)),
+            init_val=Ts_world_parent,
+            unroll=self.unroll_fk,
         )
+
         assert Ts_world_joint.shape == (*batch_axes, self.num_joints, 7)
         return Ts_world_joint
 

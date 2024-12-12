@@ -74,11 +74,7 @@ class RobotFactors:
 
         def ik_cost(
             vals: jaxls.VarValues,
-            kin: JaxKinTree,
-            target_pose: jaxlie.SE3,
-            target_joint_idx: jax.Array,
             var: jaxls.Var[Array],
-            weights: Array,
             base_tf_var: jaxls.Var[jaxlie.SE3] | jaxlie.SE3 | None = None,
             ee_tf_var: jaxls.Var[jaxlie.SE3] | jaxlie.SE3 | None = None,
         ):
@@ -106,8 +102,6 @@ class RobotFactors:
                 ).inverse()
                 @ (target_pose)
             ).log()
-            weights = jnp.broadcast_to(weights, residual.shape)
-            assert residual.shape == weights.shape
             return (residual * weights).flatten()
 
         # Handle optional base and offset transforms.
@@ -129,11 +123,7 @@ class RobotFactors:
         return jaxls.Factor(
             ik_cost,
             (
-                kin,
-                target_pose,
-                target_joint_idx,
                 JointVarType(var_idx),
-                weights,
                 base_se3_var,
                 ee_se3_var,
             ),
@@ -150,9 +140,7 @@ class RobotFactors:
 
         def limit_cost(
             vals: jaxls.VarValues,
-            kin: JaxKinTree,
             var: jaxls.Var[Array],
-            weights: Array,
         ) -> Array:
             joint_cfg: jax.Array = vals[var]
             residual_upper = jnp.maximum(0.0, joint_cfg - kin.limits_upper)
@@ -161,7 +149,7 @@ class RobotFactors:
             assert residual.shape == weights.shape
             return residual * weights
 
-        return jaxls.Factor(limit_cost, (kin, JointVarType(var_idx), weights))
+        return jaxls.Factor(limit_cost, (JointVarType(var_idx),))
 
     @staticmethod
     def limit_vel_cost_factor(
@@ -177,11 +165,8 @@ class RobotFactors:
 
         def vel_limit_cost(
             vals: jaxls.VarValues,
-            kin: JaxKinTree,
             var_curr: jaxls.Var[Array],
             var_prev: jaxls.Var[Array] | Array,
-            dt: float,
-            weights: Array,
         ) -> Array:
             prev = vals[var_prev] if isinstance(var_prev, jaxls.Var) else var_prev
             joint_vel = (vals[var_curr] - prev) / dt
@@ -198,7 +183,7 @@ class RobotFactors:
 
         return jaxls.Factor(
             vel_limit_cost,
-            (kin, JointVarType(var_idx), var_prev, dt, weights),
+            (JointVarType(var_idx), var_prev),
         )
 
     @staticmethod
@@ -212,14 +197,13 @@ class RobotFactors:
         def rest_cost(
             vals: jaxls.VarValues,
             var: jaxls.Var[Array],
-            weights: Array,
         ) -> Array:
             default = var.default_factory()
             assert default is not None
             assert default.shape == vals[var].shape and default.shape == weights.shape
             return (vals[var] - default) * weights
 
-        return jaxls.Factor(rest_cost, (JointVarType(var_idx), weights))
+        return jaxls.Factor(rest_cost, (JointVarType(var_idx),))
 
     @staticmethod
     def self_coll_factor(
@@ -236,7 +220,6 @@ class RobotFactors:
         e.g., through `RobotColl.coll_weight`.
         """
 
-        # jaxls does not support static/varying treedefs, for batching.
         def self_coll_cost(
             vals: jaxls.VarValues,
             var_curr: jaxls.Var[Array],
@@ -396,7 +379,6 @@ class RobotFactors:
             vals: jaxls.VarValues,
             var_curr: jaxls.Var[Array],
             var_past: jaxls.Var[Array],
-            weights: Array,
         ) -> Array:
             residual = vals[var_curr] - vals[var_past]
             assert residual.shape == weights.shape
@@ -407,25 +389,23 @@ class RobotFactors:
             (
                 JointVarType(var_idx_curr),
                 JointVarType(var_idx_past),
-                weights,
             ),
         )
 
     @staticmethod
-    def manipulability_cost_factors(
+    def manipulability_cost_factor(
         JointVarType: type[jaxls.Var[Array]],
         var_idx: jax.Array | int,
         kin: JaxKinTree,
         target_joint_indices: jax.Array,
         weights: float,
-    ) -> list[jaxls.Factor]:
+    ) -> jaxls.Factor:
         """Manipulability cost."""
 
         def manipulability_cost(
             vals: jaxls.VarValues,
-            kin: JaxKinTree,
             var: jaxls.Var[Array],
-            target_joint_idx: int,
+            target_joint_idx: jax.Array,
         ) -> Array:
             joint_cfg: jax.Array = vals[var]
             manipulability = RobotFactors.manip_yoshikawa(
@@ -433,19 +413,20 @@ class RobotFactors:
             )
             return ((1 / manipulability + 1e-6) * weights).flatten()
 
-        return [
-            jaxls.Factor(
-                manipulability_cost,
-                (kin, JointVarType(var_idx), target_joint_idx),
-            )
-            for target_joint_idx in target_joint_indices
-        ]
+        assert len(target_joint_indices.shape) == 1
+        return jaxls.Factor(
+            manipulability_cost,
+            (
+                JointVarType(jnp.full((target_joint_indices.shape[0],), var_idx)),
+                target_joint_indices,
+            ),
+        )
 
     @staticmethod
     def manip_yoshikawa(
         kin: JaxKinTree,
         cfg: Array,
-        target_joint_idx: int,
+        target_joint_idx: jax.Array,
     ) -> Array:
         """Manipulability, as the determinant of the Jacobian."""
         jacobian = jax.jacfwd(
