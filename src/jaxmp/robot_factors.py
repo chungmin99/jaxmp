@@ -218,6 +218,7 @@ class RobotFactors:
         `activation_dist` and `weights` should be given in terms of the collision link pairs,
         e.g., through `RobotColl.coll_weight`.
         """
+
         def self_coll_cost(
             vals: jaxls.VarValues,
             var: jaxls.Var[Array],

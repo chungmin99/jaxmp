@@ -51,6 +51,7 @@ def solve_traj_gomp(
     ): ...
 
     ik_weights = jnp.array([pos_weight] * 3 + [rot_weight] * 3)
+
     def ik_cost(
         vals: jaxls.VarValues,
         joint_var: jaxls.Var[jax.Array],
@@ -102,7 +103,7 @@ def solve_traj_gomp(
         RobotFactors.smoothness_cost_factor(
             JointVar,
             jnp.arange(1, timesteps),
-            jnp.arange(0, timesteps-1),
+            jnp.arange(0, timesteps - 1),
             jnp.array([smoothness_weight] * kin.num_actuated_joints),
         )
     )
@@ -218,7 +219,7 @@ def main(
         end = time.time()
         logger.info(f"Trajectory optimization took {end - start:.2f}s")
         update_traj_handle.disabled = False
-    
+
     update_traj_handle.on_click(lambda _: generate_traj())
 
     traj = None
