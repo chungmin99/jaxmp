@@ -8,6 +8,7 @@ import jax_dataclasses as jdc
 
 from jaxmp.robot_factors import RobotFactors
 from jaxmp.kinematics import JaxKinTree
+from jaxmp.coll import RobotColl, CollGeom
 
 
 @jdc.jit
@@ -20,7 +21,7 @@ def solve_ik(
     ik_weight: jnp.ndarray,
     *,
     joint_var_idx: int = 0,
-    rest_weight: float = 0.01,
+    rest_weight: float = 0.001,
     limit_weight: float = 100.0,
     joint_vel_weight: float = 0.0,
     dt: float = 0.01,
@@ -139,3 +140,95 @@ def solve_ik(
 
     joints = solution[JointVar(0)]
     return base_pose, joints
+
+
+@jdc.jit
+def solve_ik_with_coll(
+    kin: JaxKinTree,
+    target_joint_indices: jnp.ndarray,
+    target_poses: jaxlie.SE3,
+    robot_coll: RobotColl,
+    world_coll: list[CollGeom],
+    initial_pose: jnp.ndarray,
+    *,
+    pos_weight: jdc.Static[float] = 5.0,
+    rot_weight: jdc.Static[float] = 1.0,
+    rest_weight: jdc.Static[float] = 0.001,
+    limit_weight: jdc.Static[float] = 100.0,
+    self_coll_weight: jdc.Static[float] = 5.0,
+    world_coll_weight: jdc.Static[float] = 10.0,
+) -> jnp.ndarray:
+    # Create factor graph.
+    factors: list[jaxls.Factor] = []
+
+    JointVar = RobotFactors.get_var_class(kin, initial_pose)
+    joint_var_idx = 0
+
+    ik_weight = jnp.array([pos_weight] * 3 + [rot_weight] * 3)
+    factors.extend(
+        [
+            RobotFactors.ik_cost_factor(
+                JointVar,
+                joint_var_idx,
+                kin,
+                target_poses,
+                target_joint_indices,
+                ik_weight,
+            ),
+            RobotFactors.rest_cost_factor(
+                JointVar,
+                joint_var_idx,
+                jnp.array([rest_weight] * kin.num_actuated_joints),
+            ),
+            RobotFactors.limit_vel_cost_factor(
+                JointVar,
+                joint_var_idx,
+                kin,
+                0.1,
+                jnp.array([limit_weight] * kin.num_actuated_joints),
+                initial_pose,
+            ),
+            RobotFactors.limit_cost_factor(
+                JointVar,
+                joint_var_idx,
+                kin,
+                jnp.array([limit_weight] * kin.num_actuated_joints),
+            ),
+        ]
+    )
+
+    # Add collision factors.
+    self_coll_factor = RobotFactors.self_coll_factor(
+        JointVar, joint_var_idx, kin, robot_coll, 0.05, self_coll_weight
+    )
+    world_coll_factors = [
+        RobotFactors.world_coll_factor(
+            JointVar, joint_var_idx, kin, robot_coll, coll, 0.1, world_coll_weight
+        )
+        for coll in world_coll
+    ]
+
+    factors.append(self_coll_factor)
+    factors.extend(world_coll_factors)
+
+    # Solve IK.
+    joint_vars = [JointVar(joint_var_idx)]
+    graph = jaxls.FactorGraph.make(
+        factors,
+        joint_vars,
+        use_onp=False,
+    )
+    solution = graph.solve(
+        initial_vals=jaxls.VarValues.make(joint_vars),
+        trust_region=jaxls.TrustRegionConfig(lambda_initial=1.0),
+        termination=jaxls.TerminationConfig(
+            gradient_tolerance=1e-5,
+            parameter_tolerance=1e-5,
+            max_iterations=50,
+        ),
+        verbose=False,
+    )
+
+    # Update visualization.
+    joints = solution[JointVar(joint_var_idx)]
+    return joints
