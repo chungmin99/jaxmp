@@ -2,17 +2,15 @@
 Run sampling- or gradient-based MPC in collision aware environments.
 """
 
-from typing import Optional, Literal
+from typing import Optional
 from pathlib import Path
 import time
 import jax
-import jaxls
 
 from loguru import logger
 import tyro
 
 import jax.numpy as jnp
-import jax_dataclasses as jdc
 import jaxlie
 import numpy as onp
 
@@ -21,7 +19,7 @@ import viser.extras
 
 from jaxmp import JaxKinTree, RobotFactors
 from jaxmp.coll import Plane, RobotColl, CollGeom, link_to_spheres, Capsule
-from jaxmp.extras import load_urdf, solve_mpc, solve_ik_with_coll
+from jaxmp.extras import load_urdf, solve_mpc
 
 
 def main(
@@ -34,7 +32,7 @@ def main(
 ):
     urdf = load_urdf(robot_description, robot_urdf_path)
     robot_coll = RobotColl.from_urdf(urdf, create_coll_bodies=link_to_spheres)
-    kin = JaxKinTree.from_urdf(urdf)
+    kin = JaxKinTree.from_urdf(urdf, unroll_fk=True)
     rest_pose = (kin.limits_upper + kin.limits_lower) / 2
     assert isinstance(robot_coll.coll, CollGeom)
 
@@ -45,15 +43,13 @@ def main(
     urdf_vis.update_cfg(onp.array(rest_pose))
     server.scene.add_grid("ground", width=2, height=2, cell_size=0.1)
 
-    # urdf_ik_vis = viser.extras.ViserUrdf(
-    #     server, urdf, root_node_name="/ik", mesh_color_override=(255, 200, 200)
-    # )
-
     # Create ground plane as an obstacle (world collision)!
     ground_obs = Plane.from_point_and_normal(
         jnp.array([0.0, 0.0, 0.0]), jnp.array([0.0, 0.0, 1.0])
     )
-    ground_obs_handle = server.scene.add_mesh_trimesh("ground_plane", ground_obs.to_trimesh())
+    ground_obs_handle = server.scene.add_mesh_trimesh(
+        "ground_plane", ground_obs.to_trimesh()
+    )
     server.scene.add_grid(
         "ground", width=3, height=3, cell_size=0.1, position=(0.0, 0.0, 0.001)
     )
@@ -61,9 +57,9 @@ def main(
     # Also add a movable sphere as an obstacle (world collision).
     # sphere_obs = Sphere.from_center_and_radius(jnp.zeros(3), jnp.array([0.05]))
     sphere_obs = Capsule.from_radius_and_height(
-        radius=jnp.array([0.05]), 
-        height=jnp.array([2.0]), 
-        transform=jaxlie.SE3.from_translation(jnp.zeros(3))
+        radius=jnp.array([0.05]),
+        height=jnp.array([2.0]),
+        transform=jaxlie.SE3.from_translation(jnp.zeros(3)),
     )
     sphere_obs_handle = server.scene.add_transform_controls(
         "sphere_obs", scale=0.2, position=(0.2, 0.0, 0.2)
@@ -113,10 +109,7 @@ def main(
     JointVar = RobotFactors.get_var_class(kin)
 
     joints = rest_pose
-    joints_with_ik = rest_pose
     joint_traj = jnp.broadcast_to(rest_pose, (n_steps, kin.num_actuated_joints))
-
-    prng_key = jax.random.PRNGKey(0)
 
     has_jitted = False
     while True:
@@ -145,55 +138,26 @@ def main(
             )
         )
 
-        random_perturb = jax.random.normal(prng_key, (1, n_steps, kin.num_actuated_joints))
-        random_perturb *= jnp.sqrt((kin.limits_upper - kin.limits_lower)/2)
-        joint_traj = random_perturb + joint_traj
-
         start = time.time()
-        joint_traj, cost = jax.vmap(
-            lambda initial, traj: solve_mpc(
-                kin,
-                robot_coll,
-                [] if not use_world_collision else [ground_obs, curr_sphere_obs],
-                target_poses,
-                target_joint_indices,
-                initial,
-                JointVar,
-                n_steps=n_steps,
-                dt=dt,
-                prev_sols=traj,
-                use_self_collision=use_self_collision,
-                use_world_collision=use_world_collision,
-            )
-        )(joints[None].repeat(1, 0), joint_traj)
+        joint_traj, cost = solve_mpc(
+            kin,
+            robot_coll,
+            [] if not use_world_collision else [ground_obs, curr_sphere_obs],
+            target_poses,
+            target_joint_indices,
+            joints,
+            JointVar,
+            n_steps=n_steps,
+            dt=dt,
+            prev_sols=joint_traj,
+            use_self_collision=use_self_collision,
+            use_world_collision=use_world_collision,
+        )
         jax.block_until_ready((joint_traj, cost))
         timing_handle.value = (time.time() - start) * 1000
-        
-        best_cost_idx = jnp.argmin(cost)
-        joint_traj = joint_traj[best_cost_idx]
-        cost = cost[best_cost_idx]
 
         cost_handle.value = cost.item()
         joints = joint_traj[0]
-
-        # joints_with_ik = solve_ik_with_coll(
-        #     kin,
-        #     target_joint_indices,
-        #     target_poses,
-        #     robot_coll,
-        #     [] if not use_world_collision else [ground_obs, curr_sphere_obs],
-        #     joints_with_ik,
-        #     self_coll_weight=(0.0 if use_self_collision else 2.0),
-        # )
-
-        # joints = solve_ik_with_coll(
-        #     kin,
-        #     target_joint_indices,
-        #     target_poses,
-        #     robot_coll,
-        #     [ground_obs, curr_sphere_obs],
-        #     joints,
-        # )
 
         # Update timing info.
         if not has_jitted:
@@ -201,7 +165,6 @@ def main(
             has_jitted = True
 
         urdf_vis.update_cfg(onp.array(joints))
-        # urdf_ik_vis.update_cfg(onp.array(joints_with_ik))
 
         for target_frame_handle, target_joint_idx in zip(
             target_frame_handles, target_joint_indices

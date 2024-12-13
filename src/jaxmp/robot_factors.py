@@ -266,26 +266,30 @@ class RobotFactors:
         else:
             assert len(activation_dist) == len(robot_coll.self_coll_list)
 
+        if isinstance(var_idx, jax.Array):
+            assert len(var_idx.shape) == 1
+            num_vars = var_idx.shape[0]
+        else:
+            num_vars = 1
+
         num_coll_factors = len(robot_coll.self_coll_list)
+
+        indices_0 = jnp.asarray(
+            [robot_coll.link_to_colls[pair[0]] for pair in robot_coll.self_coll_list]
+        )
+        indices_1 = jnp.asarray(
+            [robot_coll.link_to_colls[pair[1]] for pair in robot_coll.self_coll_list]
+        )
+
         factor = jaxls.Factor(
             self_coll_cost,
             (
-                JointVarType(jnp.array([var_idx] * num_coll_factors)),
-                None if prev_var_idx is None else JointVarType(jnp.array([prev_var_idx] * num_coll_factors)),
-                activation_dist,
-                weights,
-                jnp.asarray(
-                    [
-                        robot_coll.link_to_colls[pair[0]]
-                        for pair in robot_coll.self_coll_list
-                    ]
-                ),
-                jnp.asarray(
-                    [
-                        robot_coll.link_to_colls[pair[1]]
-                        for pair in robot_coll.self_coll_list
-                    ]
-                ),
+                JointVarType(jnp.repeat(var_idx, num_coll_factors)),
+                None if prev_var_idx is None else JointVarType(jnp.repeat(prev_var_idx, num_coll_factors)),
+                jnp.tile(activation_dist, num_vars),
+                jnp.tile(weights, num_vars),
+                jnp.tile(indices_0, (num_vars, 1)), 
+                jnp.tile(indices_1, (num_vars, 1)), 
             ),
         )
         return factor
@@ -293,7 +297,7 @@ class RobotFactors:
     @staticmethod
     def world_coll_factor(
         JointVarType: type[jaxls.Var[Array]],
-        joint_idx: jax.Array | int,
+        var_idx: jax.Array | int,
         kin: JaxKinTree,
         robot_coll: RobotColl,
         other: CollGeom,
@@ -349,20 +353,22 @@ class RobotFactors:
         else:
             assert len(activation_dist) == len(robot_coll.coll_link_names)
 
-        num_coll_factors = len(robot_coll.coll_link_names)
+        if isinstance(var_idx, jax.Array):
+            assert len(var_idx.shape) == 1
+            num_vars = var_idx.shape[0]
+        else:
+            num_vars = 1
+        coll_indices = jnp.asarray(list(robot_coll.link_to_colls.values()))
+        num_coll_factors = coll_indices.shape[0]
+
         return jaxls.Factor(
             world_coll_cost,
             (
-                JointVarType(jnp.array([joint_idx] * num_coll_factors)),
-                None if prev_var_idx is None else JointVarType(jnp.array([prev_var_idx] * num_coll_factors)),
-                activation_dist,
-                weights,
-                jnp.asarray(
-                    [
-                        robot_coll.link_to_colls[coll_idx]
-                        for coll_idx in range(num_coll_factors)
-                    ]
-                ),
+                JointVarType(jnp.repeat(var_idx, num_coll_factors)),
+                None if prev_var_idx is None else JointVarType(jnp.repeat(prev_var_idx, num_coll_factors)),
+                jnp.tile(activation_dist, num_vars),
+                jnp.tile(weights, num_vars),
+                jnp.tile(coll_indices, (num_vars, 1)),
             ),
         )
 
@@ -413,12 +419,15 @@ class RobotFactors:
             )
             return ((1 / manipulability + 1e-6) * weights).flatten()
 
+        if isinstance(var_idx, int):
+            var_idx = jnp.array([var_idx])
         assert len(target_joint_indices.shape) == 1
+
         return jaxls.Factor(
             manipulability_cost,
             (
-                JointVarType(jnp.full((target_joint_indices.shape[0],), var_idx)),
-                target_joint_indices,
+                JointVarType(jnp.repeat(var_idx, target_joint_indices.shape[0])),
+                jnp.tile(target_joint_indices, (var_idx.shape[0],)),
             ),
         )
 

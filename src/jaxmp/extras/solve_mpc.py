@@ -23,16 +23,16 @@ def solve_mpc(
     *,
     pos_weight: float = 5.0,
     rot_weight: float = 2.0,
-    rest_weight: float = 0.01,
     limit_weight: float = 100.0,
     joint_vel_weight: float = 10.0,
-    smoothness_weight: float = 10.0,
-    use_manipulability: jdc.Static[bool] = True,
+    joint_smoothness_weight: float = 10.0,
+    pose_smoothness_weight: float = 1.0,
+    use_manipulability: jdc.Static[bool] = False,
     manipulability_weight: float = 0.001,
     use_self_collision: jdc.Static[bool] = False,
-    self_collision_weight: float | jax.Array = 5.0,
+    self_collision_weight: float | jax.Array = 20.0,
     use_world_collision: jdc.Static[bool] = False,
-    world_collision_weight: float | jax.Array = 10.0,
+    world_collision_weight: float | jax.Array = 20.0,
     max_iterations: int = 50,
     prev_sols: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
@@ -55,16 +55,20 @@ def solve_mpc(
 
     num_targets = target_joint_indices.shape[0]
 
+    def batched_rplus(
+        pose: jaxlie.SE3,
+        delta: jax.Array,
+    ) -> jaxlie.SE3:
+        return jax.vmap(jaxlie.manifold.rplus)(pose, delta.reshape(num_targets, -1))
+
     class BatchedSE3Var(  # pylint: disable=missing-class-docstring
         jaxls.Var[jaxlie.SE3],
         default_factory=lambda: jaxlie.SE3.identity((num_targets,)),
-        retract_fn=jaxlie.manifold.rplus,
-        tangent_dim=jaxlie.SE3.tangent_dim,
+        retract_fn=batched_rplus,
+        tangent_dim=jaxlie.SE3.tangent_dim * num_targets,
     ): ...
 
-    # BatchedSE3Var = jaxls.SE3Var
-
-    def ik_cost(vals, joint_var, pose_var):
+    def match_joint_to_pose_cost(vals, joint_var, pose_var):
         joint_cfg = vals[joint_var]
         target_pose = vals[pose_var]
         Ts_joint_world = kin.forward_kinematics(joint_cfg)
@@ -87,92 +91,96 @@ def solve_mpc(
     )
 
     # Define stage costs.
-    for i in range(n_steps + 1):
-        factors.extend(
-            [
-                jaxls.Factor(
-                    ik_cost,
-                    (
-                        JointVar(i),
-                        BatchedSE3Var(i),
-                    ),
+    factors.extend(
+        [
+            jaxls.Factor(
+                match_joint_to_pose_cost,
+                (
+                    JointVar(jnp.arange(n_steps + 1)),
+                    BatchedSE3Var(jnp.arange(n_steps + 1)),
                 ),
-                RobotFactors.limit_cost_factor(
-                    JointVar,
-                    i,
-                    kin,
-                    jnp.array([limit_weight] * kin.num_actuated_joints),
-                ),
-                RobotFactors.rest_cost_factor(
-                    JointVar,
-                    i,
-                    jnp.array([rest_weight] * kin.num_actuated_joints),
-                ),
-            ]
-        )
+            ),
+            RobotFactors.limit_cost_factor(
+                JointVar,
+                jnp.arange(n_steps + 1),
+                kin,
+                jnp.array([limit_weight] * kin.num_actuated_joints),
+            ),
+        ]
+    )
 
-        if use_manipulability:
-            factors.extend(
-                RobotFactors.manipulability_cost_factors(
-                    JointVar,
-                    i,
-                    kin,
-                    target_joint_indices,
-                    manipulability_weight,
+    # Smoothness / velocity-related costs.
+    factors.extend(
+        [
+            jaxls.Factor(
+                lambda vals, var_prev, var_curr: (
+                    (vals[var_prev].inverse() @ vals[var_curr]).log().flatten()
                 )
+                * pose_smoothness_weight,
+                (
+                    BatchedSE3Var(jnp.arange(0, n_steps)),
+                    BatchedSE3Var(jnp.arange(1, n_steps + 1)),
+                ),
+            ),
+            jaxls.Factor(
+                lambda vals, var_prev, var_curr: (
+                    (vals[var_prev] - vals[var_curr]).flatten()
+                )
+                * joint_smoothness_weight,
+                (
+                    JointVar(jnp.arange(0, n_steps)),
+                    JointVar(jnp.arange(1, n_steps + 1)),
+                ),
+            ),
+            RobotFactors.limit_vel_cost_factor(
+                JointVar,
+                jnp.arange(1, n_steps + 1),
+                kin,
+                dt,
+                jnp.array([joint_vel_weight] * kin.num_actuated_joints),
+                prev_var_idx=jnp.arange(0, n_steps)
+            ),
+        ]
+    )
+
+    if use_manipulability:
+        factors.append(
+            RobotFactors.manipulability_cost_factor(
+                JointVar,
+                jnp.arange(n_steps + 1),
+                kin,
+                target_joint_indices,
+                manipulability_weight,
             )
-
-        if i == 0:
-            continue
-
-        # All costs that depend on the previous joint configuration.
-        factors.extend(
-            [
-                jaxls.Factor(
-                    lambda vals, var_prev, var_curr: (
-                        (vals[var_prev].inverse() @ vals[var_curr]).log().flatten()
-                    )
-                    * smoothness_weight,
-                    (BatchedSE3Var(i - 1), BatchedSE3Var(i)),
-                ),
-                RobotFactors.limit_vel_cost_factor(
-                    JointVar,
-                    i,
-                    kin,
-                    dt,
-                    jnp.array([joint_vel_weight] * kin.num_actuated_joints),
-                    prev_var_idx=(i - 1),
-                ),
-            ]
         )
 
-        if use_self_collision:
+    if use_self_collision:
+        factors.append(
+            RobotFactors.self_coll_factor(
+                JointVar,
+                jnp.arange(1, n_steps + 1),
+                kin,
+                robot_coll,
+                activation_dist=0.05,
+                weights=self_collision_weight,
+                prev_var_idx=jnp.arange(0, n_steps),
+            )
+        )
+
+    if use_world_collision:
+        for world_coll in world_coll_list:
             factors.append(
-                RobotFactors.self_coll_factor(
+                RobotFactors.world_coll_factor(
                     JointVar,
-                    i,
+                    jnp.arange(1, n_steps + 1),
                     kin,
                     robot_coll,
-                    activation_dist=0.05,
-                    weights=self_collision_weight,
-                    prev_var_idx=(i - 1),
+                    world_coll,
+                    activation_dist=0.10,
+                    weights=world_collision_weight,
+                    prev_var_idx=jnp.arange(0, n_steps),
                 )
             )
-
-        if use_world_collision:
-            for world_coll in world_coll_list:
-                factors.append(
-                    RobotFactors.world_coll_factor(
-                        JointVar,
-                        i,
-                        kin,
-                        robot_coll,
-                        world_coll,
-                        activation_dist=0.10,
-                        weights=world_collision_weight,
-                        prev_var_idx=(i - 1),
-                    )
-                )
 
     # Define terminal costs.
     factors.append(
@@ -180,8 +188,7 @@ def solve_mpc(
             lambda vals, var: (
                 (vals[var].inverse() @ target_pose).log()
                 * jnp.array([pos_weight] * 3 + [rot_weight] * 3)
-            ).flatten()
-            * 5,
+            ).flatten() * n_steps,
             (BatchedSE3Var(n_steps),),
         )
     )
@@ -200,8 +207,8 @@ def solve_mpc(
     ]
     joint_var_values.append(JointVar(n_steps).with_value(prev_sols[-1]))
 
-    pose_var_values = [jv.with_value(start_pose) for jv in pose_vars[:1]] + [
-        jv.with_value(target_pose) for jv in pose_vars[1:]
+    pose_var_values = [pv.with_value(start_pose) for pv in pose_vars[:1]] + [
+        pv.with_value(target_pose) for pv in pose_vars[1:]
     ]
 
     graph = jaxls.FactorGraph.make(
@@ -216,5 +223,6 @@ def solve_mpc(
         verbose=False,
     )
 
-    joints = jnp.stack([solution.vals[JointVar(idx)] for idx in range(1, n_steps + 1)])
-    return joints, solution.cost
+    joints = jnp.stack([solution[JointVar(idx)] for idx in range(1, n_steps + 1)])
+    cost = jnp.sum(graph.compute_residual_vector(solution)**2)
+    return joints, cost
