@@ -1,31 +1,125 @@
-"""05_mpc.py
-Run sampling- or gradient-based MPC in collision aware environments.
+"""06_mpc_sampling.py
+Run sampling-based MPC using MPPI in collision aware environments.
 """
 
 from typing import Optional
 from pathlib import Path
 import time
 import jax
-
 from loguru import logger
 import tyro
-
-import jax.numpy as jnp
 import jaxlie
+import jax.numpy as jnp
+import jax_dataclasses as jdc
 import numpy as onp
-
 import viser
 import viser.extras
-
 from jaxmp import JaxKinTree, RobotFactors
 from jaxmp.coll import Plane, RobotColl, CollGeom, link_to_spheres, Capsule
-from jaxmp.extras import load_urdf, solve_mpc
+from jaxmp.extras import load_urdf
+
+
+@jdc.jit
+def mppi(
+    kin: JaxKinTree,
+    robot_coll: RobotColl,
+    world_coll_list: list[CollGeom],
+    target_pose: jaxlie.SE3,
+    target_joint_indices: jax.Array,
+    initial_joints: jnp.ndarray,
+    n_steps: jdc.Static[int],
+    dt: float,
+    rest_pose: jnp.ndarray,
+    n_samples: int = 10000,
+    lambda_: float = 0.1,
+    noise_sigma: float = 0.005,
+    gamma: float = 0.9,
+    *,
+    pos_weight: float = 5.0,
+    rot_weight: float = 2.0,
+    limit_weight: float = 100.0,
+    joint_vel_weight: float = 10.0,
+    joint_smoothness_weight: float = 0.1,
+    pose_smoothness_weight: float = 1.0,
+    use_self_collision: bool = False,
+    self_collision_weight: float = 20.0,
+    use_world_collision: bool = False,
+    world_collision_weight: float = 20.0,
+) -> jnp.ndarray:
+    """
+    Perform MPPI to find the optimal joint trajectory.
+    """
+    def cost_function(traj):
+        # Control actions -> joint trajectory.
+        joint_cfg = jnp.cumsum(traj, axis=0) + initial_joints
+        
+        # Define cost, discount.
+        cost = jnp.zeros(joint_cfg.shape[0])
+        discount = gamma ** jnp.arange(n_steps)
+
+        # Joint limit cost.
+        residual_upper = jnp.maximum(0.0, joint_cfg - kin.limits_upper) * limit_weight
+        residual_lower = jnp.maximum(0.0, kin.limits_lower - joint_cfg) * limit_weight
+        residual = (residual_upper + residual_lower).sum(axis=-1)
+        cost += residual
+
+        # Joint velocity limit cost.
+        cost = cost.at[1:].add(
+            jnp.maximum(
+                0.0, jnp.abs(jnp.diff(joint_cfg, axis=0)) - kin.joint_vel_limit * dt
+            ).sum(axis=1)
+            * joint_vel_weight
+        )
+
+        # EE pose cost.
+        Ts_joint_world = kin.forward_kinematics(joint_cfg)
+        residual = (
+            (jaxlie.SE3(Ts_joint_world[..., target_joint_indices, :])).inverse()
+            @ target_pose
+        ).log() * jnp.array([pos_weight] * 3 + [rot_weight] * 3)
+        cost += jnp.abs(residual).sum(axis=(-1, -2))
+
+        # Joint smoothness cost.
+        cost += 
+
+        # Manipulability cost
+        # manipulability = jax.vmap(RobotFactors.manip_yoshikawa, in_axes=(None, 0, None))(kin, joint_cfg, target_joint_indices).sum(axis=-1)
+        # cost += jnp.where(manipulability < 0.05, 1.0 - manipulability, 0.0) * 0.1
+
+        # # Slight bias towards zero config
+        # cost += jnp.linalg.norm(joint_cfg - rest_pose, axis=-1) * 0.01
+
+        cost = cost * discount
+        assert cost.shape == (joint_cfg.shape[0],)
+        return cost
+
+    def sample_trajectories(mean_trajectory, covariance, key):
+        noise = jax.random.multivariate_normal(
+            key, mean=jnp.zeros(kin.num_actuated_joints), cov=covariance, shape=(n_samples, n_steps)
+        )
+        return mean_trajectory[None, :, :] + noise
+
+    key = jax.random.PRNGKey(0)
+
+    mean_trajectory = jnp.broadcast_to(jnp.zeros_like(initial_joints), (n_steps, kin.num_actuated_joints))
+    covariance = jnp.eye(kin.num_actuated_joints) * 0.005**2
+
+    key, subkey = jax.random.split(key)
+    sampled_trajectories = sample_trajectories(mean_trajectory, covariance, subkey)
+    costs = jax.vmap(cost_function)(sampled_trajectories)
+    weights = jnp.exp(-costs / lambda_)
+    weights /= jnp.sum(weights, axis=0)
+    alpha = 1.0  # Temperature parameter
+    mean_trajectory = (1 - alpha) * mean_trajectory + alpha * jnp.sum(weights[..., None] * sampled_trajectories, axis=0)
+    covariance = (1 - alpha) * covariance + alpha * jax.vmap(lambda x: jnp.cov(x, rowvar=False), in_axes=1)(sampled_trajectories * weights[..., None] - mean_trajectory)
+
+    return jnp.cumsum(mean_trajectory, axis=0) + initial_joints
 
 
 def main(
     robot_description: str = "panda",
     robot_urdf_path: Optional[Path] = None,
-    n_steps: int = 5,
+    n_steps: int = 20,
     dt: float = 0.1,
     use_world_collision: bool = True,
     use_self_collision: bool = False,
@@ -55,7 +149,6 @@ def main(
     )
 
     # Also add a movable sphere as an obstacle (world collision).
-    # sphere_obs = Sphere.from_center_and_radius(jnp.zeros(3), jnp.array([0.05]))
     sphere_obs = Capsule.from_radius_and_height(
         radius=jnp.array([0.05]),
         height=jnp.array([2.0]),
@@ -106,10 +199,10 @@ def main(
     add_joint_button.on_click(lambda _: add_joint())
     add_joint()
 
-    JointVar = RobotFactors.get_var_class(kin)
-
     joints = rest_pose
     joint_traj = jnp.broadcast_to(rest_pose, (n_steps, kin.num_actuated_joints))
+
+
 
     has_jitted = False
     while True:
@@ -139,29 +232,31 @@ def main(
         )
 
         start = time.time()
-        joint_traj, cost = solve_mpc(
+        joint_traj = mppi(
             kin,
             robot_coll,
             [] if not use_world_collision else [ground_obs, curr_sphere_obs],
             target_poses,
             target_joint_indices,
             joints,
-            JointVar,
             n_steps=n_steps,
             dt=dt,
-            prev_sols=joint_traj,
             use_self_collision=use_self_collision,
             use_world_collision=use_world_collision,
+            rest_pose=rest_pose,
         )
-        jax.block_until_ready((joint_traj, cost))
+        jax.block_until_ready(joint_traj)
         timing_handle.value = (time.time() - start) * 1000
 
-        cost_handle.value = cost.item()
+        if jnp.isnan(joint_traj).any():
+            continue
+
+        cost_handle.value = 0.0  # MPPI does not return cost directly
         joints = joint_traj[0]
 
         # Update timing info.
         if not has_jitted:
-            logger.info("JIT compile + runing took {} ms.", timing_handle.value)
+            logger.info("JIT compile + running took {} ms.", timing_handle.value)
             has_jitted = True
 
         urdf_vis.update_cfg(onp.array(joints))
