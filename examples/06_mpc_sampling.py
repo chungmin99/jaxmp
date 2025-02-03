@@ -43,7 +43,7 @@ def mppi(
     pose_smoothness_weight: float = 1.0,
     use_self_collision: bool = False,
     self_collision_weight: float = 20.0,
-    use_world_collision: bool = False,
+    use_world_collision: jdc.Static[bool] = False,
     world_collision_weight: float = 20.0,
 ) -> jnp.ndarray:
     """
@@ -91,6 +91,13 @@ def mppi(
 
         # # Slight bias towards zero config
         cost += jnp.linalg.norm(joint_cfg - rest_pose, axis=-1) * 0.01
+
+        # World collision cost.
+        # if dist < 0, then we are in collision.
+        if use_world_collision:
+            for world_coll in world_coll_list:
+                world_coll_dist = robot_coll.world_coll_dist(kin, joint_cfg, world_coll)
+                cost += jnp.clip(-world_coll_dist, min=0.0) * world_collision_weight
 
         cost = cost * discount
         assert cost.shape == (joint_cfg.shape[0],)
@@ -200,7 +207,7 @@ def main(
     robot_urdf_path: Optional[Path] = None,
     n_steps: int = 20,
     dt: float = 0.1,
-    use_world_collision: bool = False,
+    use_world_collision: bool = True,
     use_self_collision: bool = False,
 ):
     urdf = load_urdf(robot_description, robot_urdf_path)
