@@ -138,7 +138,7 @@ def solve_mpc(
                 kin,
                 dt,
                 jnp.array([joint_vel_weight] * kin.num_actuated_joints),
-                prev_var_idx=jnp.arange(0, n_steps)
+                prev_var_idx=jnp.arange(0, n_steps),
             ),
         ]
     )
@@ -188,7 +188,8 @@ def solve_mpc(
             lambda vals, var: (
                 (vals[var].inverse() @ target_pose).log()
                 * jnp.array([pos_weight] * 3 + [rot_weight] * 3)
-            ).flatten() * n_steps,
+            ).flatten()
+            * n_steps,
             (BatchedSE3Var(n_steps),),
         )
     )
@@ -224,5 +225,5 @@ def solve_mpc(
     )
 
     joints = jnp.stack([solution[JointVar(idx)] for idx in range(1, n_steps + 1)])
-    cost = jnp.sum(graph.compute_residual_vector(solution)**2)
+    cost = jnp.sum(graph.compute_residual_vector(solution) ** 2)
     return joints, cost

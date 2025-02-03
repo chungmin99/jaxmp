@@ -32,7 +32,7 @@ def make_frame(direction: jax.Array) -> jax.Array:
     direction = jnp.where(
         is_zero,
         jnp.broadcast_to(jnp.array([1.0, 0.0, 0.0]), direction.shape),
-        direction
+        direction,
     )
     direction = direction / (jnp.linalg.norm(direction) + 1e-6)
     # x = direction
@@ -247,26 +247,6 @@ class Capsule(CollGeom):
         assert sph_0.get_batch_axes() == sph_1.get_batch_axes()
 
         radii = sph_0.size[..., 0:1]
-
-        x = sph_1.pos - sph_0.pos
-        is_zero = jnp.allclose(x, 0.0)
-        x = jnp.where(is_zero, jnp.ones_like(x), x)
-        n = jnp.linalg.norm(x, axis=-1, keepdims=True)
-        n = jnp.where(is_zero, 0.0, n)
-        height = n
-
-        center = (sph_0.pos + sph_1.pos) / 2
-        rotation = jaxlie.SO3.from_matrix(make_frame(sph_1.pos - sph_0.pos))
-        transform = jaxlie.SE3.from_rotation_and_translation(rotation, center)
-
-        capsule = Capsule.from_radius_and_height(
-            radius=sph_0.size[..., 0:1],
-            height=height,
-            transform=transform,
-        )
-        return capsule
-
-        # height = jnp.linalg.norm(sph_1.pos - sph_0.pos, axis=-1, keepdims=True)
 
         x = sph_1.pos - sph_0.pos
         is_zero = jnp.allclose(x, 0.0)

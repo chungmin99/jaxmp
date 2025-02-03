@@ -285,11 +285,13 @@ class RobotFactors:
             self_coll_cost,
             (
                 JointVarType(jnp.repeat(var_idx, num_coll_factors)),
-                None if prev_var_idx is None else JointVarType(jnp.repeat(prev_var_idx, num_coll_factors)),
+                None
+                if prev_var_idx is None
+                else JointVarType(jnp.repeat(prev_var_idx, num_coll_factors)),
                 jnp.tile(activation_dist, num_vars),
                 jnp.tile(weights, num_vars),
-                jnp.tile(indices_0, (num_vars, 1)), 
-                jnp.tile(indices_1, (num_vars, 1)), 
+                jnp.tile(indices_0, (num_vars, 1)),
+                jnp.tile(indices_1, (num_vars, 1)),
             ),
         )
         return factor
@@ -365,7 +367,9 @@ class RobotFactors:
             world_coll_cost,
             (
                 JointVarType(jnp.repeat(var_idx, num_coll_factors)),
-                None if prev_var_idx is None else JointVarType(jnp.repeat(prev_var_idx, num_coll_factors)),
+                None
+                if prev_var_idx is None
+                else JointVarType(jnp.repeat(prev_var_idx, num_coll_factors)),
                 jnp.tile(activation_dist, num_vars),
                 jnp.tile(weights, num_vars),
                 jnp.tile(coll_indices, (num_vars, 1)),

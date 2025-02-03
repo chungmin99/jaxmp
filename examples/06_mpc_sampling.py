@@ -104,11 +104,15 @@ def mppi(
         assert mean_trajectory.shape == (
             n_steps,
             kin.num_actuated_joints,
-        ), f"mean_trajectory shape: {mean_trajectory.shape}, expected: ({n_steps}, {kin.num_actuated_joints})"
+        ), (
+            f"mean_trajectory shape: {mean_trajectory.shape}, expected: ({n_steps}, {kin.num_actuated_joints})"
+        )
         assert covariance.shape == (
             kin.num_actuated_joints,
             kin.num_actuated_joints,
-        ), f"covariance shape: {covariance.shape}, expected: ({kin.num_actuated_joints}, {kin.num_actuated_joints})"
+        ), (
+            f"covariance shape: {covariance.shape}, expected: ({kin.num_actuated_joints}, {kin.num_actuated_joints})"
+        )
 
         # Sample trajectories: (n_samples, n_steps, n_joints)
         noise = jax.random.multivariate_normal(
