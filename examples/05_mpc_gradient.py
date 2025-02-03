@@ -36,7 +36,7 @@ def main(
     rest_pose = (kin.limits_upper + kin.limits_lower) / 2
     assert isinstance(robot_coll.coll, CollGeom)
 
-    server = viser.ViserServer(port=8081)
+    server = viser.ViserServer()
 
     # Visualize robot, target joint pose, and desired joint pose.
     urdf_vis = viser.extras.ViserUrdf(server, urdf)

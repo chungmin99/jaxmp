@@ -440,5 +440,8 @@ class RobotFactors:
         """Manipulability, as the determinant of the Jacobian."""
         jacobian = jax.jacfwd(
             lambda cfg: jaxlie.SE3(kin.forward_kinematics(cfg)).translation()
-        )(cfg)[target_joint_idx]
+        )(cfg)
+        assert target_joint_idx.shape == (1,)
+        jacobian = jacobian[target_joint_idx].squeeze()
+        assert jacobian.shape == (3, kin.num_actuated_joints)
         return jnp.sqrt(jnp.linalg.det(jacobian @ jacobian.T))

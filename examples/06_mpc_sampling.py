@@ -31,8 +31,8 @@ def mppi(
     dt: float,
     rest_pose: jnp.ndarray,
     n_samples: int = 10000,
-    lambda_: float = 0.1,
-    noise_sigma: float = 0.005,
+    lambda_: float = 0.2,
+    noise_sigma: float = 0.02,
     gamma: float = 0.9,
     *,
     pos_weight: float = 5.0,
@@ -49,10 +49,11 @@ def mppi(
     """
     Perform MPPI to find the optimal joint trajectory.
     """
+
     def cost_function(traj):
         # Control actions -> joint trajectory.
         joint_cfg = jnp.cumsum(traj, axis=0) + initial_joints
-        
+
         # Define cost, discount.
         cost = jnp.zeros(joint_cfg.shape[0])
         discount = gamma ** jnp.arange(n_steps)
@@ -80,38 +81,116 @@ def mppi(
         cost += jnp.abs(residual).sum(axis=(-1, -2))
 
         # Joint smoothness cost.
-        cost += 
+        # cost +=
 
         # Manipulability cost
-        # manipulability = jax.vmap(RobotFactors.manip_yoshikawa, in_axes=(None, 0, None))(kin, joint_cfg, target_joint_indices).sum(axis=-1)
-        # cost += jnp.where(manipulability < 0.05, 1.0 - manipulability, 0.0) * 0.1
+        manipulability = jax.vmap(
+            RobotFactors.manip_yoshikawa, in_axes=(None, 0, None)
+        )(kin, joint_cfg, target_joint_indices).sum(axis=-1)
+        cost += jnp.where(manipulability < 0.05, 1.0 - manipulability, 0.0) * 0.1
 
         # # Slight bias towards zero config
-        # cost += jnp.linalg.norm(joint_cfg - rest_pose, axis=-1) * 0.01
+        cost += jnp.linalg.norm(joint_cfg - rest_pose, axis=-1) * 0.01
 
         cost = cost * discount
         assert cost.shape == (joint_cfg.shape[0],)
         return cost
 
-    def sample_trajectories(mean_trajectory, covariance, key):
+    def mppi_iteration(mean_trajectory, covariance, key):
+        # Shape assertions for inputs
+        assert mean_trajectory.shape == (
+            n_steps,
+            kin.num_actuated_joints,
+        ), f"mean_trajectory shape: {mean_trajectory.shape}, expected: ({n_steps}, {kin.num_actuated_joints})"
+        assert covariance.shape == (
+            kin.num_actuated_joints,
+            kin.num_actuated_joints,
+        ), f"covariance shape: {covariance.shape}, expected: ({kin.num_actuated_joints}, {kin.num_actuated_joints})"
+
+        # Sample trajectories: (n_samples, n_steps, n_joints)
         noise = jax.random.multivariate_normal(
-            key, mean=jnp.zeros(kin.num_actuated_joints), cov=covariance, shape=(n_samples, n_steps)
+            key,
+            mean=jnp.zeros(kin.num_actuated_joints),
+            cov=covariance,
+            shape=(n_samples, n_steps),
         )
-        return mean_trajectory[None, :, :] + noise
+        assert noise.shape == (
+            n_samples,
+            n_steps,
+            kin.num_actuated_joints,
+        ), f"noise shape: {noise.shape}"
 
+        sampled_trajectories = (
+            mean_trajectory[None, :, :] + noise
+        )  # (n_samples, n_steps, n_joints)
+        assert sampled_trajectories.shape == (
+            n_samples,
+            n_steps,
+            kin.num_actuated_joints,
+        ), f"sampled_trajectories shape: {sampled_trajectories.shape}"
+
+        # Evaluate costs per timestep: (n_samples, n_steps)
+        costs = jax.vmap(cost_function)(sampled_trajectories)  # (n_samples, n_steps)
+        assert costs.shape == (
+            n_samples,
+            n_steps,
+        ), f"costs shape: {costs.shape}, expected: ({n_samples}, {n_steps})"
+
+        # Calculate weights per timestep
+        weights = jnp.exp(-costs / lambda_)  # (n_samples, n_steps)
+        weights = weights / (
+            jnp.sum(weights, axis=0)[None, :] + 1e-8
+        )  # Normalize per timestep
+        assert weights.shape == (n_samples, n_steps), f"weights shape: {weights.shape}"
+
+        # Update mean trajectory per timestep
+        weights_expanded = weights[:, :, None]  # (n_samples, n_steps, 1)
+        new_mean = jnp.sum(
+            weights_expanded * sampled_trajectories, axis=0
+        )  # (n_steps, n_joints)
+        assert new_mean.shape == (
+            n_steps,
+            kin.num_actuated_joints,
+        ), f"new_mean shape: {new_mean.shape}"
+
+        # Update covariance per timestep
+        centered = (
+            sampled_trajectories - new_mean[None, :, :]
+        )  # (n_samples, n_steps, n_joints)
+        new_covariance = jnp.zeros_like(covariance)
+
+        for t in range(n_steps):
+            weighted_centered = (
+                weights[:, t, None] * centered[:, t, :]
+            )  # (n_samples, n_joints)
+            new_covariance += jnp.einsum(
+                "ni,nj->ij", weighted_centered, centered[:, t, :]
+            )
+        new_covariance = (
+            new_covariance / n_steps + jnp.eye(kin.num_actuated_joints) * 1e-4
+        )
+
+        return new_mean, new_covariance
+
+    # Initialize
     key = jax.random.PRNGKey(0)
+    mean_trajectory = jnp.zeros((n_steps, kin.num_actuated_joints))
+    covariance = jnp.eye(kin.num_actuated_joints) * noise_sigma**2
 
-    mean_trajectory = jnp.broadcast_to(jnp.zeros_like(initial_joints), (n_steps, kin.num_actuated_joints))
-    covariance = jnp.eye(kin.num_actuated_joints) * 0.005**2
+    # Run multiple iterations
+    n_iterations = 5
 
-    key, subkey = jax.random.split(key)
-    sampled_trajectories = sample_trajectories(mean_trajectory, covariance, subkey)
-    costs = jax.vmap(cost_function)(sampled_trajectories)
-    weights = jnp.exp(-costs / lambda_)
-    weights /= jnp.sum(weights, axis=0)
-    alpha = 1.0  # Temperature parameter
-    mean_trajectory = (1 - alpha) * mean_trajectory + alpha * jnp.sum(weights[..., None] * sampled_trajectories, axis=0)
-    covariance = (1 - alpha) * covariance + alpha * jax.vmap(lambda x: jnp.cov(x, rowvar=False), in_axes=1)(sampled_trajectories * weights[..., None] - mean_trajectory)
+    def scan_fn(carry, _):
+        key, mean_trajectory, covariance = carry
+        key, subkey = jax.random.split(key)
+        mean_trajectory, covariance = mppi_iteration(
+            mean_trajectory, covariance, subkey
+        )
+        return (key, mean_trajectory, covariance), None
+
+    (key, mean_trajectory, covariance), _ = jax.lax.scan(
+        scan_fn, (key, mean_trajectory, covariance), None, length=n_iterations
+    )
 
     return jnp.cumsum(mean_trajectory, axis=0) + initial_joints
 
@@ -121,7 +200,7 @@ def main(
     robot_urdf_path: Optional[Path] = None,
     n_steps: int = 20,
     dt: float = 0.1,
-    use_world_collision: bool = True,
+    use_world_collision: bool = False,
     use_self_collision: bool = False,
 ):
     urdf = load_urdf(robot_description, robot_urdf_path)
@@ -130,7 +209,7 @@ def main(
     rest_pose = (kin.limits_upper + kin.limits_lower) / 2
     assert isinstance(robot_coll.coll, CollGeom)
 
-    server = viser.ViserServer()
+    server = viser.ViserServer(port=8081)
 
     # Visualize robot, target joint pose, and desired joint pose.
     urdf_vis = viser.extras.ViserUrdf(server, urdf)
@@ -202,8 +281,6 @@ def main(
     joints = rest_pose
     joint_traj = jnp.broadcast_to(rest_pose, (n_steps, kin.num_actuated_joints))
 
-
-
     has_jitted = False
     while True:
         if len(target_name_handles) == 0:
@@ -252,7 +329,7 @@ def main(
             continue
 
         cost_handle.value = 0.0  # MPPI does not return cost directly
-        joints = joint_traj[0]
+        joints = joint_traj[1]
 
         # Update timing info.
         if not has_jitted:
