@@ -32,7 +32,7 @@ def mppi(
     n_steps: jdc.Static[int],
     dt: float,
     rest_pose: jnp.ndarray,
-    n_samples: int = 10000,
+    n_samples: jdc.Static[int] = 10000,
     lambda_: float = 0.2,
     noise_sigma: float = 0.02,
     gamma: float = 0.9,
@@ -204,6 +204,18 @@ def main(
     n_steps: int = 20,
     dt: float = 0.1,
     use_world_collision: bool = True,
+    # MPPI parameters
+    lambda_: float = 0.4,
+    noise_sigma: float = 0.08,
+    gamma: float = 0.99,
+    n_iterations: int = 1,
+    n_samples: int = 10000,
+    # Cost weights
+    pos_weight: float = 5.0,
+    rot_weight: float = 2.0,
+    limit_weight: float = 100.0,
+    joint_vel_weight: float = 10.0,
+    world_collision_weight: float = 20.0,
 ):
     urdf = load_urdf(robot_description, robot_urdf_path)
     robot_coll = RobotColl.from_urdf(urdf, create_coll_bodies=link_to_spheres)
@@ -251,39 +263,49 @@ def main(
     target_tf_handles: list[viser.TransformControlsHandle] = []
     target_frame_handles: list[viser.BatchedAxesHandle] = []
 
-    mppi_params = {
-        "lambda": server.gui.add_slider(
-            "Lambda", min=0.01, max=1.0, initial_value=0.2, step=0.01
-        ),
-        "noise_sigma": server.gui.add_slider(
-            "Noise Sigma", min=0.001, max=0.1, initial_value=0.02, step=0.001
-        ),
-        "gamma": server.gui.add_slider(
-            "Gamma (discount)", min=0.1, max=1.0, initial_value=0.9, step=0.01
-        ),
-        "n_iterations": server.gui.add_slider(
-            "Number of iterations", min=1, max=10, initial_value=1, step=1
-        ),
-    }
+    with server.gui.add_folder("MPPI Parameters"):
+        mppi_params = {
+            "lambda": server.gui.add_slider(
+                "Temperature", min=0.01, max=1.0, initial_value=lambda_, step=0.01
+            ),
+            "noise_sigma": server.gui.add_slider(
+                "Noise Sigma", min=0.001, max=0.1, initial_value=noise_sigma, step=0.001
+            ),
+            "gamma": server.gui.add_slider(
+                "Discount", min=0.1, max=1.0, initial_value=gamma, step=0.01
+            ),
+            "n_iterations": server.gui.add_slider(
+                "Iterations", min=1, max=10, initial_value=n_iterations, step=1
+            ),
+        }
 
     # Add GUI elements for weights
-    weight_params = {
-        "pos_weight": server.gui.add_slider(
-            "Position Weight", min=0.1, max=20.0, initial_value=5.0, step=0.1
-        ),
-        "rot_weight": server.gui.add_slider(
-            "Rotation Weight", min=0.1, max=20.0, initial_value=2.0, step=0.1
-        ),
-        "world_collision_weight": server.gui.add_slider(
-            "Collision Weight", min=0.1, max=50.0, initial_value=20.0, step=0.1
-        ),
-        "limit_weight": server.gui.add_slider(
-            "Joint Limit Weight", min=1.0, max=200.0, initial_value=100.0, step=1.0
-        ),
-        "joint_vel_weight": server.gui.add_slider(
-            "Joint Velocity Weight", min=0.1, max=50.0, initial_value=10.0, step=0.1
-        ),
-    }
+    with server.gui.add_folder("Cost Weights"):
+        weight_params = {
+            "pos_weight": server.gui.add_slider(
+                "Position", min=0.1, max=20.0, initial_value=pos_weight, step=0.1
+            ),
+            "rot_weight": server.gui.add_slider(
+                "Rotation", min=0.1, max=20.0, initial_value=rot_weight, step=0.1
+            ),
+            "world_collision_weight": server.gui.add_slider(
+                "Collision",
+                min=0.1,
+                max=50.0,
+                initial_value=world_collision_weight,
+                step=0.1,
+            ),
+            "limit_weight": server.gui.add_slider(
+                "Joint Limit", min=1.0, max=200.0, initial_value=limit_weight, step=1.0
+            ),
+            "joint_vel_weight": server.gui.add_slider(
+                "Joint Velocity",
+                min=0.1,
+                max=50.0,
+                initial_value=joint_vel_weight,
+                step=0.1,
+            ),
+        }
 
     def add_joint():
         # Show target joint name.
@@ -365,6 +387,7 @@ def main(
             limit_weight=weight_params["limit_weight"].value,
             joint_vel_weight=weight_params["joint_vel_weight"].value,
             n_iterations=mppi_params["n_iterations"].value,
+            n_samples=n_samples,
         )
         jax.block_until_ready(joint_traj)
         timing_handle.value = (time.time() - start) * 1000
