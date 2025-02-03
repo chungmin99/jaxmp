@@ -1,5 +1,7 @@
 """06_mpc_sampling.py
 Run sampling-based MPC using MPPI in collision aware environments.
+
+Poorly tuned, but still works / shows the idea.
 """
 
 from typing import Optional
@@ -39,12 +41,9 @@ def mppi(
     rot_weight: float = 2.0,
     limit_weight: float = 100.0,
     joint_vel_weight: float = 10.0,
-    joint_smoothness_weight: float = 0.1,
-    pose_smoothness_weight: float = 1.0,
-    use_self_collision: bool = False,
-    self_collision_weight: float = 20.0,
     use_world_collision: jdc.Static[bool] = False,
     world_collision_weight: float = 20.0,
+    n_iterations: jdc.Static[int] = 5,
 ) -> jnp.ndarray:
     """
     Perform MPPI to find the optimal joint trajectory.
@@ -79,9 +78,6 @@ def mppi(
             @ target_pose
         ).log() * jnp.array([pos_weight] * 3 + [rot_weight] * 3)
         cost += jnp.abs(residual).sum(axis=(-1, -2))
-
-        # Joint smoothness cost.
-        # cost +=
 
         # Manipulability cost
         manipulability = jax.vmap(
@@ -166,13 +162,15 @@ def mppi(
         )  # (n_samples, n_steps, n_joints)
         new_covariance = jnp.zeros_like(covariance)
 
-        for t in range(n_steps):
+        def compute_weighted_covariance(t):
             weighted_centered = (
                 weights[:, t, None] * centered[:, t, :]
             )  # (n_samples, n_joints)
-            new_covariance += jnp.einsum(
-                "ni,nj->ij", weighted_centered, centered[:, t, :]
-            )
+            return jnp.einsum("ni,nj->ij", weighted_centered, centered[:, t, :])
+
+        new_covariance += jax.vmap(compute_weighted_covariance)(
+            jnp.arange(n_steps)
+        ).sum(axis=0)
         new_covariance = (
             new_covariance / n_steps + jnp.eye(kin.num_actuated_joints) * 1e-4
         )
@@ -185,18 +183,16 @@ def mppi(
     covariance = jnp.eye(kin.num_actuated_joints) * noise_sigma**2
 
     # Run multiple iterations
-    n_iterations = 5
-
     def scan_fn(carry, _):
-        key, mean_trajectory, covariance = carry
+        mean_trajectory, covariance, key = carry
         key, subkey = jax.random.split(key)
         mean_trajectory, covariance = mppi_iteration(
             mean_trajectory, covariance, subkey
         )
-        return (key, mean_trajectory, covariance), None
+        return (mean_trajectory, covariance, key), None
 
-    (key, mean_trajectory, covariance), _ = jax.lax.scan(
-        scan_fn, (key, mean_trajectory, covariance), None, length=n_iterations
+    (mean_trajectory, covariance, _), _ = jax.lax.scan(
+        scan_fn, (mean_trajectory, covariance, key), None, length=n_iterations
     )
 
     return jnp.cumsum(mean_trajectory, axis=0) + initial_joints
@@ -208,7 +204,6 @@ def main(
     n_steps: int = 20,
     dt: float = 0.1,
     use_world_collision: bool = True,
-    use_self_collision: bool = False,
 ):
     urdf = load_urdf(robot_description, robot_urdf_path)
     robot_coll = RobotColl.from_urdf(urdf, create_coll_bodies=link_to_spheres)
@@ -255,6 +250,40 @@ def main(
     target_name_handles: list[viser.GuiDropdownHandle] = []
     target_tf_handles: list[viser.TransformControlsHandle] = []
     target_frame_handles: list[viser.BatchedAxesHandle] = []
+
+    mppi_params = {
+        "lambda": server.gui.add_slider(
+            "Lambda", min=0.01, max=1.0, initial_value=0.2, step=0.01
+        ),
+        "noise_sigma": server.gui.add_slider(
+            "Noise Sigma", min=0.001, max=0.1, initial_value=0.02, step=0.001
+        ),
+        "gamma": server.gui.add_slider(
+            "Gamma (discount)", min=0.1, max=1.0, initial_value=0.9, step=0.01
+        ),
+        "n_iterations": server.gui.add_slider(
+            "Number of iterations", min=1, max=10, initial_value=1, step=1
+        ),
+    }
+
+    # Add GUI elements for weights
+    weight_params = {
+        "pos_weight": server.gui.add_slider(
+            "Position Weight", min=0.1, max=20.0, initial_value=5.0, step=0.1
+        ),
+        "rot_weight": server.gui.add_slider(
+            "Rotation Weight", min=0.1, max=20.0, initial_value=2.0, step=0.1
+        ),
+        "world_collision_weight": server.gui.add_slider(
+            "Collision Weight", min=0.1, max=50.0, initial_value=20.0, step=0.1
+        ),
+        "limit_weight": server.gui.add_slider(
+            "Joint Limit Weight", min=1.0, max=200.0, initial_value=100.0, step=1.0
+        ),
+        "joint_vel_weight": server.gui.add_slider(
+            "Joint Velocity Weight", min=0.1, max=50.0, initial_value=10.0, step=0.1
+        ),
+    }
 
     def add_joint():
         # Show target joint name.
@@ -325,9 +354,17 @@ def main(
             joints,
             n_steps=n_steps,
             dt=dt,
-            use_self_collision=use_self_collision,
             use_world_collision=use_world_collision,
             rest_pose=rest_pose,
+            lambda_=mppi_params["lambda"].value,
+            noise_sigma=mppi_params["noise_sigma"].value,
+            gamma=mppi_params["gamma"].value,
+            pos_weight=weight_params["pos_weight"].value,
+            rot_weight=weight_params["rot_weight"].value,
+            world_collision_weight=weight_params["world_collision_weight"].value,
+            limit_weight=weight_params["limit_weight"].value,
+            joint_vel_weight=weight_params["joint_vel_weight"].value,
+            n_iterations=mppi_params["n_iterations"].value,
         )
         jax.block_until_ready(joint_traj)
         timing_handle.value = (time.time() - start) * 1000
