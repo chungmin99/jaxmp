@@ -244,11 +244,9 @@ class Capsule(CollGeom):
 
         x = sph_1.pos - sph_0.pos
         is_zero = jnp.allclose(x, 0.0)
-        # temporarily swap x with ones if is_zero, then swap back
         x = jnp.where(is_zero, jnp.ones_like(x), x)
         n = jnp.linalg.norm(x, axis=-1, keepdims=True)
-        # n = jnp.where(is_zero, 0.0, n)
-        height = n
+        height = jax.lax.select(is_zero, jnp.zeros_like(n), n)
 
         center = (sph_0.pos + sph_1.pos) / 2
         rotation = jaxlie.SO3.from_matrix(make_frame(sph_1.pos - sph_0.pos))
