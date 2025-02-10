@@ -28,18 +28,12 @@ def make_frame(direction: jax.Array) -> jax.Array:
     # Based on `mujoco.mjx._src.math.make_frame`.
 
     is_zero = jnp.isclose(direction, 0.0).all(axis=-1, keepdims=True)
-    # direction = direction / (jnp.linalg.norm(direction) + 1e-6)
     direction = jnp.where(
         is_zero,
         jnp.broadcast_to(jnp.array([1.0, 0.0, 0.0]), direction.shape),
         direction,
     )
     direction = direction / (jnp.linalg.norm(direction) + 1e-6)
-    # x = direction
-    # x = jnp.where(is_zero, jnp.ones_like(x), x)
-    # n = jnp.linalg.norm(x, axis=-1, keepdims=True)
-    # n = jnp.where(is_zero, 0.0, n)
-    # direction = x / n
 
     y = jnp.broadcast_to(jnp.array([0, 1, 0]), (*direction.shape[:-1], 3))
     z = jnp.broadcast_to(jnp.array([0, 0, 1]), (*direction.shape[:-1], 3))

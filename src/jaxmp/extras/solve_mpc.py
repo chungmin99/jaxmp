@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import jax
 import jax.numpy as jnp
 import jaxlie
@@ -55,18 +57,24 @@ def solve_mpc(
 
     num_targets = target_joint_indices.shape[0]
 
-    def batched_rplus(
-        pose: jaxlie.SE3,
-        delta: jax.Array,
-    ) -> jaxlie.SE3:
-        return jax.vmap(jaxlie.manifold.rplus)(pose, delta.reshape(num_targets, -1))
-
+    # Custom SE3 variable to batch across multiple joint targets.
+    # This is not to be confused with SE3Vars with ids, which we use here for timesteps.
     class BatchedSE3Var(  # pylint: disable=missing-class-docstring
         jaxls.Var[jaxlie.SE3],
         default_factory=lambda: jaxlie.SE3.identity((num_targets,)),
         retract_fn=batched_rplus,
         tangent_dim=jaxlie.SE3.tangent_dim * num_targets,
     ): ...
+
+    # We need to define a custom rplus operation that can batch across multiple
+    # joint targets, while keeping SE3Var's`tangent_dim` property the same.
+    # We could have created SE3Vars with ids=(tstep * num_joints + joint_idx),
+    # but this feels more readable.
+    def batched_rplus(
+        pose: jaxlie.SE3,
+        delta: jax.Array,
+    ) -> jaxlie.SE3:
+        return jax.vmap(jaxlie.manifold.rplus)(pose, delta.reshape(num_targets, -1))
 
     def match_joint_to_pose_cost(vals, joint_var, pose_var):
         joint_cfg = vals[joint_var]
