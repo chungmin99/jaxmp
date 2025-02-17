@@ -31,9 +31,11 @@ def main(
     rot_weight: float = 1.0,
     rest_weight: float = 0.01,
     limit_weight: float = 100.0,
+    dt: float = 0.01,
     device: Literal["cpu", "gpu"] = "cpu",
     robot_description: Optional[str] = "yumi",
     robot_urdf_path: Optional[Path] = None,
+    create_share_url: bool = False,
 ):
     """
     Test robot inverse kinematics using JaxMP.
@@ -45,6 +47,7 @@ def main(
         device: Device to use.
         robot_description: Name of the robot description to load.
         robot_urdf_path: Path to the robot URDF file.
+        create_share_url: Whether to create a share URL for the server; useful for remote / colab access.
     """
     # Set device.
     jax.config.update("jax_platform_name", device)
@@ -57,6 +60,8 @@ def main(
     JointVar = RobotFactors.get_var_class(kin, rest_pose)
 
     server = viser.ViserServer()
+    if create_share_url:
+        server.request_share_url()
 
     # Visualize robot, target joint pose, and desired joint pose.
     urdf_base_frame = server.scene.add_frame("/base", show_axes=False)
@@ -115,14 +120,33 @@ def main(
     )
 
     smooth_handle = server.gui.add_checkbox("Smooth", initial_value=False)
+    manipulability_cost_handler = server.gui.add_number("Yoshikawa index", 0.001, disabled=True)
 
-    with server.gui.add_folder("Manipulability"):
-        manipulabiltiy_weight_handler = server.gui.add_slider(
-            "weight", 0.0, 0.01, 0.001, 0.00
+    with server.gui.add_folder("Cost weights"):
+        pos_weight_handle = server.gui.add_slider(
+            "Position", min=0.0, max=10.0, step=0.01, initial_value=pos_weight)
+        rot_weight_handle = server.gui.add_slider(
+            "Rotation", min=0.0, max=10.0, step=0.01, initial_value=rot_weight)
+        rest_weight_handle = server.gui.add_slider(
+            "Rest", min=0.0, max=1.0, step=0.01, initial_value=rest_weight)
+        limit_weight_handle = server.gui.add_slider(
+            "Limit (joint pos)", min=0.0, max=1000.0, step=1.0, initial_value=limit_weight)
+        joint_vel_weight_handle = server.gui.add_slider(
+            "Joint vel", min=0.0, max=1.0, step=0.01, initial_value=0.0, visible=False)
+        dt_handle = server.gui.add_slider(
+            "dt", min=0.0, max=1.0, step=0.01, initial_value=dt, visible=False
         )
-        manipulability_cost_handler = server.gui.add_number(
-            "Yoshikawa index", 0.001, disabled=True
-        )
+        manipulability_weight_handle = server.gui.add_slider(
+            "Manipulability", min=0.0, max=0.1, step=0.001, initial_value=0.0)
+    
+    @smooth_handle.on_update
+    def _(_):
+        if smooth_handle.value:
+            joint_vel_weight_handle.visible = True
+            dt_handle.visible = True
+        else:
+            joint_vel_weight_handle.visible = False
+            dt_handle.visible = False
 
     set_frames_to_current_pose = server.gui.add_button("Set frames to current pose")
     add_joint_button = server.gui.add_button("Add joint!")
@@ -215,18 +239,17 @@ def main(
         target_poses = jaxlie.SE3(
             jnp.stack([pose.wxyz_xyz for pose in target_pose_list])
         )
-        manipulability_weight = manipulabiltiy_weight_handler.value
+        manipulability_weight = manipulability_weight_handle.value
 
         if smooth_handle.value:
             initial_pose = joints
-            joint_vel_weight = limit_weight
+            joint_vel_weight = joint_vel_weight_handle.value
         else:
             initial_pose = rest_pose
             joint_vel_weight = 0.0
 
-        ik_weight = jnp.array([pos_weight] * 3 + [rot_weight] * 3)
+        ik_weight = jnp.array([pos_weight_handle.value] * 3 + [rot_weight_handle.value] * 3)
         ik_weight = ik_weight * get_freeze_target_xyz_xyz()
-        manipulability_weight = manipulabiltiy_weight_handler.value
 
         # Solve!
         start_time = time.time()
@@ -238,12 +261,13 @@ def main(
             JointVar,
             ik_weight,
             ConstrainedSE3Var=ConstrainedSE3Var,
-            rest_weight=rest_weight,
-            limit_weight=limit_weight,
+            rest_weight=rest_weight_handle.value,
+            limit_weight=limit_weight_handle.value,
             joint_vel_weight=joint_vel_weight,
             use_manipulability=(manipulability_weight > 0),
             manipulability_weight=manipulability_weight,
             solver_type=solver_type_handle.value,
+            dt=dt_handle.value,
         )
 
         # Ensure all computations are complete before measuring time
