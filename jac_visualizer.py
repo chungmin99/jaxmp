@@ -130,14 +130,14 @@ def solve_ik_position_only(
                 position_cost,
                 (
                     JointVar(joint_var_idx),
-                target_joint_idx,
-                ik_weight,
-            ),
-            "auto" if use_autodiff_jac else "custom",
-            jac_custom_fn=(
-                None
-                if use_autodiff_jac or idx_applied_to_target is None
-                else lambda vals, var, target_joint_idx, weights: jac_position_cost(
+                    target_joint_idx,
+                    ik_weight,
+                ),
+                "auto" if use_autodiff_jac else "custom",
+                jac_custom_fn=(
+                    None
+                    if use_autodiff_jac or idx_applied_to_target is None
+                    else lambda vals, var, target_joint_idx, weights: jac_position_cost(
                         kin, vals[var], target_joint_idx, idx_applied_to_target[i]
                     )
                 ),
@@ -307,11 +307,12 @@ robot_to_target_joint_names = {
     "panda": ["panda_hand_tcp_joint"],
 }
 
+
 @app.command()
 def profile(
     robot_description: Literal["panda"] = "panda",
-    n_samples: int = 100,
-    n_trials: int = 1000,
+    n_trials: int = 100,
+    batch_size: int = 100,
     use_autodiff_jac: bool = True,
 ):
     urdf = load_urdf(robot_description)
@@ -336,12 +337,12 @@ def profile(
     random_key = jax.random.PRNGKey(0)
     random_cfg = jax.random.uniform(
         random_key,
-        (n_samples, kin.num_actuated_joints),
+        (batch_size, kin.num_actuated_joints),
         minval=kin.limits_lower,
         maxval=kin.limits_upper,
     )
     random_T = jaxlie.SE3(kin.forward_kinematics(random_cfg)[..., target_idx_list, :])
-    assert random_T.get_batch_axes() == (n_samples, n_target_joints)
+    assert random_T.get_batch_axes() == (batch_size, n_target_joints)
 
     logger.info("Using {} jacobian", "autodiff" if use_autodiff_jac else "analytical")
     # Solve IK with analytical jacobian.
@@ -371,7 +372,47 @@ def profile(
     for _ in range(n_trials):
         joints = vmap_fn(random_T)
         jax.block_until_ready(joints)
-    logger.info("Time per trial: {:.1f} ms", (time.time() - start_time) / n_trials * 1000)
+    average_elapsed = (time.time() - start_time) / n_trials
+    logger.info("Time per trial: {:.1f} ms", average_elapsed * 1000)
+    return average_elapsed
+
+
+@app.command()
+def profile_batch(
+    robot_description: Literal["panda"] = "panda",
+    device: Literal["cpu", "gpu"] = "cpu",
+):
+    jax.config.update("jax_platform_name", device)
+    logger.info("Using {} device", device)
+
+    n_samples = 100
+    batch_size_list = [1, 10, 100, 1000]
+    average_elapsed_no_autodiff = []
+    average_elapsed_autodiff = []
+
+    for batch_size in batch_size_list:
+        average_elapsed_no_autodiff.append(
+            profile(robot_description, n_samples, batch_size, use_autodiff_jac=False)
+        )
+        average_elapsed_autodiff.append(
+            profile(robot_description, n_samples, batch_size, use_autodiff_jac=True)
+        )
+
+    import pandas as pd
+
+    data = {
+        "batch_size": batch_size_list,
+        "average_elapsed_no_autodiff (ms)": [
+            time * 1000 for time in average_elapsed_no_autodiff
+        ],
+        "average_elapsed_autodiff (ms)": [
+            time * 1000 for time in average_elapsed_autodiff
+        ],
+    }
+
+    df = pd.DataFrame(data)
+    print(df.to_string(index=False))
+
 
 if __name__ == "__main__":
     app.cli()
