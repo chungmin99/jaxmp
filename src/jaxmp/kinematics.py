@@ -32,8 +32,8 @@ class JaxKinTree:
     num_actuated_joints: jdc.Static[int]
     """Number of actuated joints in the robot."""
 
-    joint_twists: Float[Array, "act_joints 6"]
-    """Twist parameters for each actuated joint, for revolute and prismatic joints."""
+    joint_twists: Float[Array, "joints 6"]
+    """Twist parameters for each joint. Zero for fixed joints."""
 
     Ts_parent_joint: Float[Array, "joints 7"]
     """Transform from parent joint to current joint, in the format `joints 7`."""
@@ -50,16 +50,31 @@ class JaxKinTree:
     limits_upper: Float[Array, " act_joints"]
     """Upper joint limits for each actuated joint."""
 
+    _limits_lower_all: Float[Array, " joints"]
+    """Lower joint limits for each joint; includes mimic and fixed joints."""
+
+    _limits_upper_all: Float[Array, " joints"]
+    """Upper joint limits for each joint; includes mimic and fixed joints."""
+
     joint_names: jdc.Static[tuple[str]]
     """Names of the joints, in shape `joints`."""
 
     joint_vel_limit: Float[Array, " act_joints"]
     """Joint limit velocities for each actuated joint."""
 
+    _joint_vel_limit_all: Float[Array, " joints"]
+    """Joint limit velocities for each joint; includes mimic and fixed joints."""
+
     unroll_fk: jdc.Static[bool]
     """Whether to unroll the forward kinematics `fori_loop`.
     Unrolling seems useful for collision-aware IK on GPU.
     """
+
+    mimic_multiplier: Float[Array, "joints"]
+    """Multiplier for mimic joints. 1.0 for non-mimic joints."""
+
+    mimic_offset: Float[Array, "joints"]
+    """Offset for mimic joints. 0.0 for non-mimic joints."""
 
     @staticmethod
     def from_urdf(urdf: yourdfpy.URDF, unroll_fk: bool = False) -> JaxKinTree:
@@ -72,8 +87,14 @@ class JaxKinTree:
         idx_actuated_joint = list[int]()
         limits_lower = list[float]()
         limits_upper = list[float]()
+        limits_lower_all = list[float]()
+        limits_upper_all = list[float]()
         joint_names = list[str]()
+        joint_vel_limits_all = list[float]()
         joint_vel_limits = list[float]()
+
+        mimic_multiplier = []
+        mimic_offset = []
 
         for joint_idx, joint in enumerate(urdf.joint_map.values()):
             # Get joint names.
@@ -83,19 +104,46 @@ class JaxKinTree:
             act_idx = JaxKinTree._get_act_joint_idx(urdf, joint, joint_idx)
             idx_actuated_joint.append(act_idx)
 
-            # Get the twist parameters for all actuated joints.
-            if joint in urdf.actuated_joints:
+            # Get the twist parameters for all movable joints.
+            if joint in urdf.actuated_joints or joint.mimic is not None:
                 twist = JaxKinTree._get_act_joint_twist(joint)
                 joint_twists.append(twist)
 
                 # Get the joint limits.
                 lower, upper = JaxKinTree._get_joint_limits(joint)
-                limits_lower.append(lower)
-                limits_upper.append(upper)
+
+                if joint.mimic is None:
+                    limits_lower.append(lower)
+                    limits_upper.append(upper)
+                limits_lower_all.append(lower)
+                limits_upper_all.append(upper)
 
                 # Get the joint velocities.
                 joint_vel_limit = JaxKinTree._get_joint_limit_vel(joint)
-                joint_vel_limits.append(joint_vel_limit)
+                joint_vel_limits_all.append(joint_vel_limit)
+                if joint.mimic is None:
+                    joint_vel_limits.append(joint_vel_limit)
+
+                if joint.mimic is not None:
+                    multiplier = (
+                        1.0
+                        if joint.mimic.multiplier is None
+                        else joint.mimic.multiplier
+                    )
+                    offset = 0.0 if joint.mimic.offset is None else joint.mimic.offset
+                else:
+                    multiplier = 1.0
+                    offset = 0.0
+                mimic_multiplier.append(multiplier)
+                mimic_offset.append(offset)
+            else:
+                # Fixed joint, no twist.
+                joint_twists.append(jnp.zeros(6))
+                limits_lower_all.append(0)
+                limits_upper_all.append(0)
+                joint_vel_limits_all.append(0.0)
+                mimic_multiplier.append(1.0)
+                mimic_offset.append(0.0)
 
             # Get the parent joint index and transform for each joint.
             if joint.origin is None and joint.type == "fixed":
@@ -118,17 +166,24 @@ class JaxKinTree:
         num_actuated_joints = len(urdf.actuated_joints)
         limits_lower = jnp.array(limits_lower)
         limits_upper = jnp.array(limits_upper)
+        limits_lower_all = jnp.array(limits_lower_all)
+        limits_upper_all = jnp.array(limits_upper_all)
         joint_names = tuple[str](joint_names)
+        joint_vel_limits_all = jnp.array(joint_vel_limits_all)
         joint_vel_limits = jnp.array(joint_vel_limits)
 
-        assert idx_actuated_joint.shape == (len(urdf.joint_map),)
-        assert joint_twists.shape == (num_actuated_joints, 6)
+        mimic_multiplier = jnp.array(mimic_multiplier)
+        mimic_offset = jnp.array(mimic_offset)
+
+        assert idx_actuated_joint.shape == (num_joints,)
+        assert joint_twists.shape == (num_joints, 6)
         assert Ts_parent_joint.shape == (num_joints, 7)
         assert idx_parent_joint.shape == (num_joints,)
         assert idx_actuated_joint.max() == num_actuated_joints - 1
-        assert limits_lower.shape == (num_actuated_joints,)
-        assert limits_upper.shape == (num_actuated_joints,)
+        assert limits_lower_all.shape == (num_joints,)
+        assert limits_upper_all.shape == (num_joints,)
         assert len(joint_names) == num_joints
+        assert joint_vel_limits_all.shape == (num_joints,)
         assert joint_vel_limits.shape == (num_actuated_joints,)
 
         return JaxKinTree(
@@ -140,9 +195,14 @@ class JaxKinTree:
             idx_parent_joint=idx_parent_joint,
             limits_lower=limits_lower,
             limits_upper=limits_upper,
+            _limits_lower_all=limits_lower_all,
+            _limits_upper_all=limits_upper_all,
             joint_names=joint_names,
             joint_vel_limit=joint_vel_limits,
+            _joint_vel_limit_all=joint_vel_limits_all,
             unroll_fk=unroll_fk,
+            mimic_multiplier=mimic_multiplier,
+            mimic_offset=mimic_offset,
         )
 
     @staticmethod
@@ -237,6 +297,18 @@ class JaxKinTree:
         return 1.0
 
     @jdc.jit
+    def map_actuated_to_all_joints(
+        self, cfg: Float[Array, "*batch num_act_joints"]
+    ) -> Float[Array, "*batch num_joints"]:
+        """Expand the actuated joint configuration to the full joint configuration, to account for mimic joints.
+        Does not apply mimic multiplier/offset settings."""
+        batch_axes = cfg.shape[:-1]
+        cfg = cfg[..., self.idx_actuated_joint]
+        cfg = jnp.where(self.idx_actuated_joint == -1, 0.0, cfg)
+        assert cfg.shape == (*batch_axes, self.num_joints)
+        return cfg
+
+    @jdc.jit
     def forward_kinematics(
         self,
         cfg: Float[Array, "*batch num_act_joints"],
@@ -253,14 +325,17 @@ class JaxKinTree:
         batch_axes = cfg.shape[:-1]
         assert cfg.shape == (*batch_axes, self.num_actuated_joints)
 
-        Ts_joint_child = jaxlie.SE3.exp(self.joint_twists * cfg[..., None]).wxyz_xyz
-        assert Ts_joint_child.shape == (*batch_axes, self.num_actuated_joints, 7)
+        cfg = self.map_actuated_to_all_joints(cfg)
+        assert cfg.shape == (*batch_axes, self.num_joints)
 
-        Ts_joint_child = jnp.where(
-            (self.idx_actuated_joint == -1)[..., None],
-            jaxlie.SE3.identity().wxyz_xyz,
-            Ts_joint_child[..., self.idx_actuated_joint, :],
-        )
+        # Apply mimic joint scaling, if applicable.
+        cfg = cfg * self.mimic_multiplier + self.mimic_offset
+        assert cfg.shape == (*batch_axes, self.num_joints)
+
+        # Compute transforms for all joints
+        Ts_joint_child = jaxlie.SE3.exp(self.joint_twists * cfg[..., None]).wxyz_xyz
+        assert Ts_joint_child.shape == (*batch_axes, self.num_joints, 7)
+
         Ts_parent_child = (
             jaxlie.SE3(self.Ts_parent_joint) @ jaxlie.SE3(Ts_joint_child)
         ).wxyz_xyz

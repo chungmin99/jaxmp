@@ -169,10 +169,12 @@ class RobotFactors:
             var_prev: jaxls.Var[Array] | Array,
         ) -> Array:
             prev = vals[var_prev] if isinstance(var_prev, jaxls.Var) else var_prev
+            # Get velocity in actuated joint space
             joint_vel = (vals[var_curr] - prev) / dt
-            residual = jnp.maximum(0.0, jnp.abs(joint_vel) - kin.joint_vel_limit)
-            assert residual.shape == weights.shape
-            return residual * weights
+            # Expand to all joints and apply mimic scaling
+            joint_vel = kin.map_actuated_to_all_joints(joint_vel)
+            residual = jnp.maximum(0.0, jnp.abs(joint_vel) - kin._joint_vel_limit_all)
+            return residual * kin.map_actuated_to_all_joints(weights)
 
         if prev_var_idx is not None:
             var_prev = JointVarType(prev_var_idx)
