@@ -249,7 +249,7 @@ def solve_ik_analytically(
         use_onp=False,
     )
     solution = graph.solve(
-        # linear_solver="dense_cholesky",
+        linear_solver="dense_cholesky",
         initial_vals=jaxls.VarValues.make(joint_var_values),
         trust_region=jaxls.TrustRegionConfig(),
         termination=jaxls.TerminationConfig(
