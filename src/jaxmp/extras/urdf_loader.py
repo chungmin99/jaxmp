@@ -47,14 +47,22 @@ def _sort_joint_map(urdf: yourdfpy.URDF) -> yourdfpy.URDF:
     joints = deepcopy(urdf.robot.joints)
 
     # Sort the joints in topological order.
+    sorted_joint_names = list[str]()
     sorted_joints = list[yourdfpy.Joint]()
-    joint_from_child = {j.child: j for j in joints}
+    available_links = {urdf.scene.graph.base_frame}  # Start with the base link.
+    
     while joints:
         for j in joints:
-            if j.parent not in joint_from_child:
+            # A joint can be added if:
+            # 1. Its parent link is available AND
+            # 2. Either it's not a mimic joint, or the joint it mimics is already sorted.
+            if (j.parent in available_links) and (
+                j.mimic is None or j.mimic.joint in sorted_joint_names
+            ):
                 sorted_joints.append(j)
                 joints.remove(j)
-                joint_from_child.pop(j.child)
+                sorted_joint_names.append(j.name)
+                available_links.add(j.child)  # The child link becomes available.
                 break
         else:
             raise ValueError("Cycle detected in URDF!")
