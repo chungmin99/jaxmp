@@ -441,17 +441,19 @@ def profile(
 
     logger.info("Using {} jacobian", "autodiff" if use_autodiff_jac else "analytical")
     # Solve IK with analytical jacobian.
-    vmap_fn = jax.vmap(
-        lambda target_pose: solve_ik_analytically(
-            kin,
-            target_pose=target_pose,
-            target_joint_indices=tuple(target_idx_list),
-            initial_pose=rest_pose,
-            JointVar=JointVar,
-            use_autodiff_jac=use_autodiff_jac,
-            idx_applied_to_target=jnp.array(idx_applied_to_target_list),
-            ik_weight=jnp.array([5.0] * 3 + [1.0] * 3),  # Position weights
-        ),
+    vmap_fn = jax.jit(
+        jax.vmap(
+            lambda target_pose: solve_ik_analytically(
+                kin,
+                target_pose=target_pose,
+                target_joint_indices=tuple(target_idx_list),
+                initial_pose=rest_pose,
+                JointVar=JointVar,
+                use_autodiff_jac=use_autodiff_jac,
+                idx_applied_to_target=jnp.array(idx_applied_to_target_list),
+                ik_weight=jnp.array([5.0] * 3 + [1.0] * 3),  # Position weights
+            ),
+        )
     )
     start_time = time.time()
     joints = vmap_fn(random_T)
@@ -476,21 +478,21 @@ def profile(
 def profile_batch(
     robot_description: Literal["panda"] = "panda",
     device: Literal["cpu", "gpu"] = "cpu",
+    n_trials: int = 100,
 ):
     jax.config.update("jax_platform_name", device)
     logger.info("Using {} device", device)
 
-    n_samples = 100
     batch_size_list = [1, 10, 100, 1000]
     average_elapsed_no_autodiff = []
     average_elapsed_autodiff = []
 
     for batch_size in batch_size_list:
         average_elapsed_no_autodiff.append(
-            profile(robot_description, n_samples, batch_size, use_autodiff_jac=False)
+            profile(robot_description, n_trials, batch_size, use_autodiff_jac=False)
         )
         average_elapsed_autodiff.append(
-            profile(robot_description, n_samples, batch_size, use_autodiff_jac=True)
+            profile(robot_description, n_trials, batch_size, use_autodiff_jac=True)
         )
 
     import pandas as pd
