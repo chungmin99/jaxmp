@@ -140,9 +140,15 @@ class JaxKinTree:
                 mimic_offset.append(0.0)
 
             # Get parent joint information.
-            parent_idx, T_parent_joint = JaxKinTree._get_T_parent_joint(
-                urdf, joint, joint_idx
-            )
+            if joint.origin is None and joint.type == "fixed":
+                # Fixed joint, no transform.
+                logger.info("Found fixed joint with no origin, placing at origin.")
+                parent_idx = -1
+                T_parent_joint = jaxlie.SE3.identity().wxyz_xyz
+            else:
+                parent_idx, T_parent_joint = JaxKinTree._get_T_parent_joint(
+                    urdf, joint, joint_idx
+                )
             idx_parent_joint.append(parent_idx)
             Ts_parent_joint.append(T_parent_joint)
 
@@ -257,7 +263,7 @@ class JaxKinTree:
 
     @jdc.jit
     def map_actuated_to_all_joints(
-        self, cfg: Float[Array, "*batch num_act_joints"], apply_mimic_scale: bool = False
+        self, cfg: Float[Array, "*batch num_act_joints"], apply_mimic_scale: jdc.Static[bool] = False
     ) -> Float[Array, "*batch num_joints"]:
         """Expand the actuated joint configuration to the full joint configuration.
         If `apply_mimic_scale` is True, the mimic multiplier/offset settings are applied."""

@@ -148,8 +148,7 @@ class RobotFactors:
             residual_upper = jnp.maximum(0.0, joint_cfg - kin._limits_upper_all)
             residual_lower = jnp.maximum(0.0, kin._limits_lower_all - joint_cfg)
             residual = residual_upper + residual_lower
-            assert residual.shape == weights.shape
-            return residual * weights
+            return residual * kin.map_actuated_to_all_joints(weights, apply_mimic_scale=False)
 
         return jaxls.Factor(limit_cost, (JointVarType(var_idx),))
 
