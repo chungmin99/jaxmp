@@ -24,6 +24,7 @@ class RobotFactors:
         if default_val is None:
             default_val = (kin.limits_upper + kin.limits_lower) / 2
 
+        # Create variable for _actuated_ joints, excluding mimic and fixed joints.
         class JointVar(  # pylint: disable=missing-class-docstring
             jaxls.Var[Array],
             default_factory=lambda: default_val.copy(),
@@ -143,8 +144,9 @@ class RobotFactors:
             var: jaxls.Var[Array],
         ) -> Array:
             joint_cfg: jax.Array = vals[var]
-            residual_upper = jnp.maximum(0.0, joint_cfg - kin.limits_upper)
-            residual_lower = jnp.maximum(0.0, kin.limits_lower - joint_cfg)
+            joint_cfg = kin.map_actuated_to_all_joints(joint_cfg, apply_mimic_scale=True)
+            residual_upper = jnp.maximum(0.0, joint_cfg - kin._limits_upper_all)
+            residual_lower = jnp.maximum(0.0, kin._limits_lower_all - joint_cfg)
             residual = residual_upper + residual_lower
             assert residual.shape == weights.shape
             return residual * weights
@@ -169,12 +171,15 @@ class RobotFactors:
             var_prev: jaxls.Var[Array] | Array,
         ) -> Array:
             prev = vals[var_prev] if isinstance(var_prev, jaxls.Var) else var_prev
-            # Get velocity in actuated joint space
+
+            # Get velocity in actuated joint space.
             joint_vel = (vals[var_curr] - prev) / dt
-            # Expand to all joints and apply mimic scaling
-            joint_vel = kin.map_actuated_to_all_joints(joint_vel)
+
+            # Expand to all joints and apply mimic scaling.
+            joint_vel = kin.map_actuated_to_all_joints(joint_vel, apply_mimic_scale=False)
+
             residual = jnp.maximum(0.0, jnp.abs(joint_vel) - kin._joint_vel_limit_all)
-            return residual * kin.map_actuated_to_all_joints(weights)
+            return residual * kin.map_actuated_to_all_joints(weights, apply_mimic_scale=False)
 
         if prev_var_idx is not None:
             var_prev = JointVarType(prev_var_idx)
