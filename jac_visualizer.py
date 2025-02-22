@@ -3,46 +3,85 @@ from __future__ import annotations
 import time
 from typing import Literal
 
-import numpy as np
-import numpy as onp
-import tyro
-from tyro.extras import SubcommandApp
-
 import jax
 import jax.numpy as jnp
+import jax_dataclasses as jdc
 import jaxlie
-
+import jaxls
+import numpy as np
 import viser
+from loguru import logger
+from tyro.extras import SubcommandApp
 from viser.extras import ViserUrdf
 
 from jaxmp import JaxKinTree
 from jaxmp.extras.urdf_loader import load_urdf
-
-from typing import Literal
-
-import jax
-import jax.numpy as jnp
-import jaxlie
-import jaxls
-import jax_dataclasses as jdc
-
-from jaxmp.robot_factors import RobotFactors
 from jaxmp.kinematics import JaxKinTree
-
-from loguru import logger
+from jaxmp.robot_factors import RobotFactors
 
 app = SubcommandApp()
 
 
-def jac_position_cost(
+def _skew(omega: jax.Array) -> jax.Array:
+    """Returns the skew-symmetric form of a length-3 vector."""
+
+    wx, wy, wz = jnp.moveaxis(omega, -1, 0)
+    zeros = jnp.zeros_like(wx)
+    return jnp.stack(
+        [zeros, -wz, wy, wz, zeros, -wx, -wy, wx, zeros],
+        axis=-1,
+    ).reshape((*omega.shape[:-1], 3, 3))
+
+
+def V_inv(theta: jax.Array) -> jax.Array:
+    theta_squared = jnp.sum(jnp.square(theta), axis=-1)
+    use_taylor = theta_squared < 1e-5
+
+    # Shim to avoid NaNs in jnp.where branches, which cause failures for
+    # reverse-mode AD.
+    theta_squared_safe = jnp.where(
+        use_taylor,
+        jnp.ones_like(theta_squared),  # Any non-zero value should do here.
+        theta_squared,
+    )
+    del theta_squared
+    theta_safe = jnp.sqrt(theta_squared_safe)
+    half_theta_safe = theta_safe / 2.0
+
+    skew_omega = _skew(theta)
+    V_inv = jnp.where(
+        use_taylor[..., None, None],
+        jnp.eye(3)
+        - 0.5 * skew_omega
+        + jnp.einsum("...ij,...jk->...ik", skew_omega, skew_omega) / 12.0,
+        (
+            jnp.eye(3)
+            - 0.5 * skew_omega
+            + (
+                (
+                    1.0
+                    - theta_safe
+                    * jnp.cos(half_theta_safe)
+                    / (2.0 * jnp.sin(half_theta_safe))
+                )
+                / theta_squared_safe
+            )[..., None, None]
+            * jnp.einsum("...ij,...jk->...ik", skew_omega, skew_omega)
+        ),
+    )
+    return V_inv
+
+
+def jac_position_and_orientation_cost(
     kin: JaxKinTree,
     cfg: jnp.ndarray,
     target_joint_idx: int,
     idx_applied_to_target: jax.Array,
+    target: jaxlie.SE3,
 ) -> jnp.ndarray:
-    """Forward kinematics Jacobian."""
+    """Jacobian for doing basic IK."""
     Ts_world_joint = kin.forward_kinematics(cfg)
-    T_target_joint = jaxlie.SE3(Ts_world_joint[target_joint_idx])
+    T_world_target = jaxlie.SE3(Ts_world_joint[target_joint_idx])
 
     # Get the kinematic chain
     Ts_world_act_joint = jaxlie.SE3(Ts_world_joint)
@@ -52,7 +91,7 @@ def jac_position_cost(
 
     ### Get the translational component.
     # Get the kinematic chain
-    parent_translation = T_target_joint.translation() - Ts_world_act_joint.translation()
+    parent_translation = T_world_target.translation() - Ts_world_act_joint.translation()
     omega = Ts_world_act_joint.rotation() @ omega
     vel = Ts_world_act_joint.rotation() @ vel
 
@@ -66,11 +105,58 @@ def jac_position_cost(
         )
     )
     assert jac_translation.shape == (3, kin.num_actuated_joints)
-    return jac_translation
+
+    omega_wrt_ee = T_world_target.rotation().inverse() @ omega
+    ori_error = T_world_target.rotation().inverse() @ target.rotation()
+    Jlog3 = V_inv(ori_error.log())
+
+    jac_orientation = jnp.zeros((3, kin.num_actuated_joints))
+    jac_orientation = jac_orientation.at[:, idx_applied_to_target].add(
+        jnp.where(
+            (idx_applied_to_target != -1)[None],
+            Jlog3 @ omega_wrt_ee.T,
+            jnp.zeros((3, 1)),
+        )
+    )
+    # need negative because inverse is on target term, I think
+    jac_orientation = -jac_orientation
+
+    return (
+        jnp.concatenate(
+            [
+                jac_translation,
+                jac_orientation,
+            ],
+            axis=0,
+        )
+        # (1, num_actuated_joints)
+        * kin._get_tangent_scaling_terms()[None, :]
+    )
+
+
+def position_and_orientation_cost(
+    kin: JaxKinTree,
+    cfg: jax.Array,
+    target: jaxlie.SE3,
+    target_joint_idx: int | jax.Array,
+) -> jnp.ndarray:
+    T_world_target = kin.forward_kinematics(cfg)[target_joint_idx]
+    assert T_world_target.shape == (7,)
+    return jnp.concatenate(
+        [
+            T_world_target[4:7] - target.wxyz_xyz[4:7],
+            # We're going to compute:
+            #
+            #    log(R_ee_target)
+            #
+            # (R_world_ee)^{-1} @ R_world_target
+            (jaxlie.SO3(T_world_target[:4]).inverse() @ target.rotation()).log(),
+        ]
+    )
 
 
 @jdc.jit
-def solve_ik_position_only(
+def solve_ik_analytically(
     kin: JaxKinTree,
     target_pose: jaxlie.SE3,
     target_joint_indices: tuple[int, ...],
@@ -86,8 +172,8 @@ def solve_ik_position_only(
     max_iterations: int = 50,
 ) -> jnp.ndarray:
     """
-    Solve IK for position only; this script is intended to benchmark autodiff vs. analytical jacobians.
-    This function is similar to `solve_ik`, but it also takes in:
+    Solve IK; this script is intended to benchmark autodiff vs. analytical
+    jacobians. This function is similar to `solve_ik`, but it also takes in:
 
     - `use_autodiff_jac`: whether to use autodiff to compute the jacobian.
     If False, we use `jac_position_cost` to compute the jacobian analytically.
@@ -109,25 +195,26 @@ def solve_ik_position_only(
         ),
     ]
 
-    def position_cost(
+    def ik_cost(
         vals: jaxls.VarValues,
         var: jaxls.Var[jax.Array],
         target_joint_idx: jax.Array | int,
         weights: jnp.ndarray,
     ):
-        joint_cfg: jax.Array = vals[var]
-        residual = (
-            jaxlie.SE3(
-                kin.forward_kinematics(joint_cfg)[target_joint_idx]
-            ).translation()
-            - target_pose.translation()
-        )
-        return (residual * weights).flatten()
+        return (
+            position_and_orientation_cost(
+                kin,
+                vals[var],
+                target_pose,
+                target_joint_idx,
+            )
+            * weights
+        ).flatten()
 
     for i, target_joint_idx in enumerate(target_joint_indices):
         factors.append(
             jaxls.Factor(
-                position_cost,
+                ik_cost,
                 (
                     JointVar(joint_var_idx),
                     target_joint_idx,
@@ -137,9 +224,17 @@ def solve_ik_position_only(
                 jac_custom_fn=(
                     None
                     if use_autodiff_jac or idx_applied_to_target is None
-                    else lambda vals, var, target_joint_idx, weights: jac_position_cost(
-                        kin, vals[var], target_joint_idx, idx_applied_to_target[i]
+                    else lambda vals,
+                    var,
+                    target_joint_idx,
+                    weights: jac_position_and_orientation_cost(
+                        kin,
+                        vals[var],
+                        target_joint_idx,
+                        idx_applied_to_target[i],
+                        target_pose,
                     )
+                    * weights[:, None]
                 ),
             ),
         )
@@ -209,7 +304,6 @@ def get_idx_applied_to_target(
 @app.command()
 def vis(
     robot_description: str,
-    use_autodiff_jac: bool = False,
 ) -> None:
     server = viser.ViserServer()
 
@@ -236,14 +330,15 @@ def vis(
         list(urdf.joint_names),
         initial_value=urdf.joint_names[-1],  # Default to last joint
     )
+    autodiff_jac = server.gui.add_checkbox("Autodiff jacobian", initial_value=False)
     target_joint_idx = urdf.joint_names.index(target_joint_handle.value)
-    idx_applied_to_target = get_idx_applied_to_target(kin, target_joint_idx)
+    idx_applied_to_target = (get_idx_applied_to_target(kin, target_joint_idx),)
 
     @target_joint_handle.on_update
     def _(_):
         nonlocal idx_applied_to_target
         target_joint_idx = urdf.joint_names.index(target_joint_handle.value)
-        idx_applied_to_target = get_idx_applied_to_target(kin, target_joint_idx)
+        idx_applied_to_target = (get_idx_applied_to_target(kin, target_joint_idx),)
 
     Ts_world_joint = kin.forward_kinematics(rest_pose)
     target_joint_idx = urdf.joint_names.index(target_joint_handle.value)
@@ -269,15 +364,15 @@ def vis(
         # Set IK parameters based on smooth mode
         # Solve IK with timing
         start_time = time.time()
-        new_joints = solve_ik_position_only(
+        new_joints = solve_ik_analytically(
             kin,
             target_pose=target_pose,
-            target_joint_indices=jnp.array(target_joint_idx),
+            target_joint_indices=(target_joint_idx,),
             initial_pose=rest_pose,
             JointVar=JointVar,
-            use_autodiff_jac=use_autodiff_jac,
+            use_autodiff_jac=autodiff_jac.value,
             idx_applied_to_target=idx_applied_to_target,
-            ik_weight=jnp.array([5.0] * 3),  # Position weights
+            ik_weight=jnp.array([5.0] * 3 + [1.0] * 3),  # Position weights
             rest_weight=0.01,
             limit_weight=100.0,
         )
@@ -347,7 +442,7 @@ def profile(
     logger.info("Using {} jacobian", "autodiff" if use_autodiff_jac else "analytical")
     # Solve IK with analytical jacobian.
     vmap_fn = jax.vmap(
-        lambda target_pose: solve_ik_position_only(
+        lambda target_pose: solve_ik_analytically(
             kin,
             target_pose=target_pose,
             target_joint_indices=tuple(target_idx_list),
@@ -355,7 +450,7 @@ def profile(
             JointVar=JointVar,
             use_autodiff_jac=use_autodiff_jac,
             idx_applied_to_target=jnp.array(idx_applied_to_target_list),
-            ik_weight=jnp.array([5.0] * 3),  # Position weights
+            ik_weight=jnp.array([5.0] * 3 + [1.0] * 3),  # Position weights
         ),
     )
     start_time = time.time()

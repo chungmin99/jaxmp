@@ -15,11 +15,10 @@ import jax
 import jax_dataclasses as jdc
 import jaxlie
 import yourdfpy
-from loguru import logger
-
 from jax import Array
 from jax import numpy as jnp
 from jaxtyping import Float, Int
+from loguru import logger
 
 
 @jdc.pytree_dataclass
@@ -311,8 +310,11 @@ class JaxKinTree:
             # Apply units to delta, by normalizing w/ the joint velocity.
             # Important for robots with both revolute + prismatic joints
             # (e.g., fetch, robot grippers).
-            _delta = delta * self.joint_vel_limit * 0.01
+            _delta = delta * self._get_tangent_scaling_terms()
 
             return cfg + _delta
 
         return retract_fn
+
+    def _get_tangent_scaling_terms(self) -> jax.Array:
+        return self.joint_vel_limit * 0.01
