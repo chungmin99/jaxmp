@@ -62,9 +62,9 @@ class JaxKinTree:
     """Joint limit velocities for each joint; includes mimic and fixed joints."""
 
     # Mimic joint parameters.
-    mimic_multiplier: Float[Array, "joints"]
+    mimic_multiplier: Float[Array, " joints"]
     """Multiplier for mimic joints. 1.0 for non-mimic joints."""
-    mimic_offset: Float[Array, "joints"]
+    mimic_offset: Float[Array, " joints"]
     """Offset for mimic joints. 0.0 for non-mimic joints."""
 
     # Configuration.
