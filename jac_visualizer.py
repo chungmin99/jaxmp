@@ -205,7 +205,7 @@ def solve_ik_analytically(
             position_and_orientation_cost(
                 kin,
                 vals[var],
-                target_pose,
+                jaxlie.SE3(target_pose.wxyz_xyz.squeeze()),
                 target_joint_idx,
             )
             * weights
@@ -232,7 +232,7 @@ def solve_ik_analytically(
                         vals[var],
                         target_joint_idx,
                         idx_applied_to_target[i],
-                        target_pose,
+                        jaxlie.SE3(target_pose.wxyz_xyz.squeeze()),
                     )
                     * weights[:, None]
                 ),
@@ -249,7 +249,7 @@ def solve_ik_analytically(
         use_onp=False,
     )
     solution = graph.solve(
-        linear_solver="dense_cholesky",
+        # linear_solver="dense_cholesky",
         initial_vals=jaxls.VarValues.make(joint_var_values),
         trust_region=jaxls.TrustRegionConfig(),
         termination=jaxls.TerminationConfig(
