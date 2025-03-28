@@ -20,6 +20,36 @@ import numpy as onp
 import pyroki as pk
 
 
+@jdc.jit
+def solve_ik(
+    robot: pk.Robot,
+    target_pose: jaxlie.SE3,
+    target_joint_indices: jnp.ndarray,
+) -> jax.Array:
+    """
+    Solve the robot inverse kinematics problem, using PyRoki.
+    Here, we minimize the pose and joint limit costs.
+    """
+    joint_var = robot.JointVar(0)
+    vars = [joint_var]
+    factors = [
+        pk.PoseCost.make(
+            robot,
+            joint_var,
+            target_pose,
+            target_joint_indices,
+            weights=jnp.array([5.0] * 3 + [1.0] * 3),
+        ),
+        pk.LimitCost.make(
+            robot,
+            joint_var,
+            weights=jnp.array([100.0] * robot.num_actuated_joints),
+        ),
+    ]
+    sol = pk.solve(vars, factors, verbose=True)
+    return sol[joint_var]
+
+
 def main(
     device: Literal["cpu", "gpu"] = "cpu",
     robot_description: Optional[str] = "panda",
@@ -43,30 +73,56 @@ def main(
     urdf_vis = viser.extras.ViserUrdf(server, urdf, root_node_name="/base")
     server.scene.add_grid("/grid", width=2, height=2, cell_size=0.1)
 
-    target_name_handle = server.gui.add_dropdown(
-        "target joint",
-        list(robot.joint_names),
-        initial_value=robot.joint_names[0],
-    )
-    target_tf_handle = server.scene.add_transform_controls(
-        "target_transform", scale=0.2
-    )
-    target_frame_handle = server.scene.add_frame(
-        "target",
-        axes_length=0.5 * 0.2,
-        axes_radius=0.05 * 0.2,
-        origin_radius=0.1 * 0.2,
-    )
     timing_handle = server.gui.add_number("Time (ms)", 0.01, disabled=True)
+    add_joint_button = server.gui.add_button("Add joint")
+
+    target_name_handles: list[viser.GuiDropdownHandle] = []
+    target_tf_handles: list[viser.TransformControlsHandle] = []
+    target_frame_handles: list[viser.FrameHandle] = []
+
+    def add_joint():
+        idx = len(target_name_handles)
+        target_name_handle = server.gui.add_dropdown(
+            f"target joint {idx}",
+            list(urdf.joint_names),
+            initial_value=urdf.joint_names[0],
+        )
+        target_tf_handle = server.scene.add_transform_controls(
+            f"target_transform_{idx}", scale=0.2
+        )
+        target_frame_handle = server.scene.add_frame(
+            f"target_{idx}",
+            axes_length=0.5 * 0.2,
+            axes_radius=0.05 * 0.2,
+            origin_radius=0.1 * 0.2,
+        )
+        target_name_handles.append(target_name_handle)
+        target_tf_handles.append(target_tf_handle)
+        target_frame_handles.append(target_frame_handle)
+
+    add_joint_button.on_click(lambda _: add_joint())
+    add_joint()
 
     while True:
-        target_joint_idx = robot.joint_names.index(target_name_handle.value)
-        target_pose = jaxlie.SE3(
-            jnp.array([*target_tf_handle.wxyz, *target_tf_handle.position])[None]
+        target_joint_indices = jnp.array(
+            [
+                robot.joint_names.index(target_name_handles[i].value)
+                for i in range(len(target_name_handles))
+            ]
+        )
+        target_poses = jaxlie.SE3(
+            jnp.stack(
+                [
+                    jnp.array(
+                        [*target_tf_handles[i].wxyz, *target_tf_handles[i].position]
+                    )
+                    for i in range(len(target_name_handles))
+                ]
+            )
         )
 
         start = time.time()
-        joints = solve_ik(robot, target_pose, jnp.array([target_joint_idx]))
+        joints = solve_ik(robot, target_poses, target_joint_indices)
         jax.block_until_ready(joints)
         end = time.time()
 
@@ -74,33 +130,10 @@ def main(
         urdf_vis.update_cfg(onp.array(joints))
 
         Ts_joint_world = robot.forward_kinematics(joints)
-        pose = jaxlie.SE3(Ts_joint_world[target_joint_idx])
-        target_frame_handle.position = onp.array(pose.translation().squeeze())
-        target_frame_handle.wxyz = onp.array(pose.rotation().wxyz.squeeze())
-
-
-@jdc.jit
-def solve_ik(
-    robot: pk.Robot,
-    target_pose: jaxlie.SE3,
-    target_joint_indices: jnp.ndarray,
-) -> jax.Array:
-    joint_var = robot.JointVar(0)
-    vars = [joint_var]
-    factors = [
-        pk.PoseCost.make(
-            robot,
-            joint_var,
-            target_pose,
-            target_joint_indices,
-            weights=jnp.array([5.0] * 3 + [1.0] * 3),
-        ),
-        pk.LimitCost.make(
-            robot, joint_var, weights=jnp.array([100.0] * robot.num_actuated_joints)
-        ),
-    ]
-    sol = pk.solve(vars, factors)
-    return sol[joint_var]
+        for i in range(len(target_name_handles)):
+            pose = jaxlie.SE3(Ts_joint_world[target_joint_indices[i]])
+            target_frame_handles[i].position = onp.array(pose.translation().squeeze())
+            target_frame_handles[i].wxyz = onp.array(pose.rotation().wxyz.squeeze())
 
 
 if __name__ == "__main__":
