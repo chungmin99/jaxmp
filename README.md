@@ -31,14 +31,14 @@ To run examples, install with `pip install -e .[examples]`.
 ### Defining objectives
 Every `pyroki` code starts with loading a robot:
 
-```
+```python
 import pyroki as pk
 robot = pk.load_robot(robot_description="panda")
 ```
 
 , and composing cost functions for some objective -- for instance, for global inverse kinematics.
 
-```
+```python
 joints = robot.JointVar(0)
 
 vars = [joints]
