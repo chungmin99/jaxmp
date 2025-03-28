@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyroki"
+version = "0.0.0"
+description = "Python Robot Kinematics Library"
+readme = "README.md"
+license = { text="MIT" }
+requires-python = ">=3.12"
+classifiers = [
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent"
+]
+dependencies = [
+    "tyro",
+    "jax>=0.4.0",
+    "jaxlib",
+    "jaxlie>=1.0.0",
+    "jax_dataclasses>=1.0.0",
+    "jaxtyping",
+    "loguru",
+    "robot_descriptions",
+    "jaxls @ git+https://github.com/brentyi/jaxls.git",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pyright>=1.1.308",
+    "scikit-sparse",
+    "ruff",
+]
+examples = [
+    "viser>=0.2.0",
+]
+
+[tool.ruff.lint]
+ignore = ["F722"]  # Ignore jaxtyping forward annotation errors
