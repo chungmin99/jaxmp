@@ -39,7 +39,10 @@ def main(
     )
 
     server = viser.ViserServer()
+    server.scene.configure_default_lights()
     urdf_vis = viser.extras.ViserUrdf(server, urdf, root_node_name="/base")
+    server.scene.add_grid("/grid", width=2, height=2, cell_size=0.1)
+
     target_name_handle = server.gui.add_dropdown(
         "target joint",
         list(robot.joint_names),
