@@ -34,7 +34,7 @@ def load_robot(
         )
 
     urdf = _sort_joint_map(urdf)
-    logger.info("TODO make sure robot takes in this sorted order!")
+    logger.warning("TODO make sure robot takes in this sorted order!")
     return urdf, Robot.from_urdf(urdf)
 
 
