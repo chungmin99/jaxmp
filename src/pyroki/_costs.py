@@ -75,7 +75,9 @@ class LimitVelCost(CostFactor[Robot, jaxls.Var[Array], jaxls.Var[Array], float])
         """Joint limit velocity cost."""
         joint_vel = (vals[joint_var] - vals[prev_joint_var]) / dt
         joint_vel_eff = robot.joint.get_full_derivative(joint_vel)
-        return jnp.maximum(0.0, jnp.abs(joint_vel_eff) - robot.joint.velocity_limits_eff)
+        return jnp.maximum(
+            0.0, jnp.abs(joint_vel_eff) - robot.joint.velocity_limits_eff
+        )
 
 
 class RestCost(CostFactor[jaxls.Var[Array]]):
@@ -108,11 +110,19 @@ class ManipulabilityCost(CostFactor[Robot, jaxls.Var[Array], Array]):
         joint_var: jaxls.Var[Array],
         target_joint_indices: Array,
     ) -> Array:
-        """Manipulability cost."""
-        manipulability = self.manip_yoshikawa(
+        """Manipulability cost (translation only).
+
+        Sums the inverse manipulability across potentially multiple target indices.
+        """
+        # Vmap over the target_joint_indices
+        assert len(target_joint_indices.shape) == 1
+        vmapped_manip_yoshikawa = jax.vmap(
+            self.manip_yoshikawa, in_axes=(None, None, 0)
+        )
+        manipulabilities = vmapped_manip_yoshikawa(
             robot, vals[joint_var], target_joint_indices
         )
-        return 1 / (manipulability + 1e-6)
+        return 1 / (manipulabilities + 1e-6)
 
     @staticmethod
     def manip_yoshikawa(
@@ -120,9 +130,11 @@ class ManipulabilityCost(CostFactor[Robot, jaxls.Var[Array], Array]):
         cfg: Array,
         target_joint_idx: jax.Array,
     ) -> Array:
-        """Manipulability, as the determinant of the Jacobian."""
+        """Manipulability, as the determinant of the Jacobian (translation only)."""
         jacobian = jax.jacfwd(
             lambda cfg: jaxlie.SE3(robot.forward_kinematics(cfg)).translation()
         )(cfg)
         jacobian = jacobian[target_joint_idx].squeeze()
-        return jnp.sqrt(jnp.linalg.det(jnp.einsum("ij,ik->jk", jacobian, jacobian)))
+        JJT = jacobian @ jacobian.T
+        assert JJT.shape == (3, 3)
+        return jnp.sqrt(jnp.linalg.det(JJT))
