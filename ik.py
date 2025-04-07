@@ -43,7 +43,7 @@ def solve_ik(
         pk.LimitCost.make(
             robot,
             joint_var,
-            weights=jnp.array([100.0] * robot.joint.actuated_count),
+            weights=jnp.array([100.0] * robot.joint.count),
         ),
     ]
     sol = pk.solve(vars, factors)

@@ -57,8 +57,9 @@ class LimitCost(CostFactor[Robot, jaxls.Var[Array]]):
     ) -> Array:
         """Limit cost."""
         joint_cfg = vals[joint_var]
-        residual_upper = jnp.maximum(0.0, joint_cfg - robot.joint.upper_limits)
-        residual_lower = jnp.maximum(0.0, robot.joint.lower_limits - joint_cfg)
+        joint_cfg_eff = robot.joint.get_full_config(joint_cfg)
+        residual_upper = jnp.maximum(0.0, joint_cfg_eff - robot.joint.upper_limits_eff)
+        residual_lower = jnp.maximum(0.0, robot.joint.lower_limits_eff - joint_cfg_eff)
         return residual_upper + residual_lower
 
 
@@ -73,7 +74,8 @@ class LimitVelCost(CostFactor[Robot, jaxls.Var[Array], jaxls.Var[Array], float])
     ) -> Array:
         """Joint limit velocity cost."""
         joint_vel = (vals[joint_var] - vals[prev_joint_var]) / dt
-        return jnp.maximum(0.0, jnp.abs(joint_vel) - robot.joint.velocity_limits)
+        joint_vel_eff = robot.joint.get_full_derivative(joint_vel)
+        return jnp.maximum(0.0, jnp.abs(joint_vel_eff) - robot.joint.velocity_limits_eff)
 
 
 class RestCost(CostFactor[jaxls.Var[Array]]):

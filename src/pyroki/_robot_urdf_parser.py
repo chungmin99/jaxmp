@@ -7,7 +7,7 @@ from loguru import logger
 from copy import deepcopy
 from jax import Array
 from jax import numpy as jnp
-from jaxtyping import Float, Int
+from jaxtyping import Float, Int, Bool
 import jaxlie
 
 
@@ -17,17 +17,115 @@ class JointInfo:
 
     count: jdc.Static[int]
     actuated_count: jdc.Static[int]
-    twists: Float[Array, "actuated_count 6"]
-    parent_transforms: Float[Array, "count 7"]
-    parent_indices: Int[Array, " count"]
-    actuated_indices: Int[Array, " count"]
-    lower_limits: Float[Array, " actuated_count"]
-    upper_limits: Float[Array, " actuated_count"]
     names: jdc.Static[tuple[str, ...]]
-    velocity_limits: Float[Array, " actuated_count"]
 
-    topo_sort_inv: Int[Array, " count"]
+    # Joint parameters.
+    twists: Float[Array, "n_joints 6"]
+    """Twist parameters for each joint. Shape: (n_joints, 6)."""
+    parent_transforms: Float[Array, "n_joints 7"]
+    """Transform from parent joint to current joint. Shape: (n_joints, 7)."""
+    parent_indices: Int[Array, " n_joints"]
+    """Index of the parent joint for each joint. Shape: (n_joints,)."""
+    actuated_indices: Int[Array, " n_joints"]
+
+    # Limits for directly actuated joints.
+    lower_limits_act: Float[Array, " n_act_joints"]
+    """Lower limits for directly actuated joints. Shape: (n_act_joints,)."""
+    upper_limits_act: Float[Array, " n_act_joints"]
+    """Upper limits for directly actuated joints. Shape: (n_act_joints,)."""
+    velocity_limits_act: Float[Array, " n_act_joints"]
+    """Velocity limits for directly actuated joints. Shape: (n_act_joints,)."""
+
+    # Effective limits for ALL joints (including mimics and fixed).
+    lower_limits_eff: Float[Array, " n_joints"]
+    """Lower limits for all joints. Shape: (n_joints,)."""
+    upper_limits_eff: Float[Array, " n_joints"]
+    """Upper limits for all joints. Shape: (n_joints,)."""
+    velocity_limits_eff: Float[Array, " n_joints"]
+    """Velocity limits for all joints. Shape: (n_joints,)."""
+
+    # Mimic joint parameters.
+    mimic_multiplier: Float[Array, " n_joints"]
+    """Mimic multiplier for each joint. Shape: (n_joints,)."""
+    mimic_offset: Float[Array, " n_joints"]
+    """Mimic offset for each joint. Shape: (n_joints,)."""
+    is_mimic: Bool[Array, " n_joints"]
+    """Whether each joint is a mimic joint. Shape: (n_joints,)."""
+
+    _topo_sort_inv: Int[Array, " n_joints"]
     """Inverse topological sort order, mapping sorted joint index to original joint index."""
+
+    @jdc.jit
+    def _map_to_full_joint_space(
+        self,
+        value_actuated: Float[Array, "*batch n_act_joints"],
+        apply_offset: bool,
+    ) -> Float[Array, "*batch n_joints"]:
+        """Internal helper to map actuated values to full joint space,
+        optionally applying mimic offset."""
+        batch_axes = value_actuated.shape[:-1]
+        assert value_actuated.shape == (*batch_axes, self.actuated_count)
+
+        # Pad input vector to handle fixed joints (index -1) safely.
+        value_padded = jnp.concatenate(
+            [value_actuated, jnp.zeros((*batch_axes, 1))], axis=-1
+        )
+        safe_actuated_indices = jnp.where(
+            self.actuated_indices == -1,
+            self.actuated_count,  # Point to the zero padding
+            self.actuated_indices,
+        )
+
+        # value_referenced contains the value of the joint each joint index refers to.
+        value_referenced = value_padded[..., safe_actuated_indices]
+        assert value_referenced.shape == (*batch_axes, self.count)
+
+        # Apply mimic multiplier.
+        value_multiplied = value_referenced * self.mimic_multiplier
+
+        # Conditionally add mimic offset.
+        value_full = jnp.where(
+            apply_offset, value_multiplied + self.mimic_offset, value_multiplied
+        )
+        assert value_full.shape == (*batch_axes, self.count)
+
+        return value_full
+
+    @jdc.jit
+    def get_full_config(
+        self,
+        cfg_actuated: Float[Array, "*batch n_act_joints"],
+    ) -> Float[Array, "*batch n_joints"]:
+        """Compute the full joint configuration vector (for all n_joints)
+        from the configuration of the actuated joints (n_act_joints).
+
+        Handles fixed joints and applies mimic joint relationships (multiplier + offset).
+
+        Args:
+            cfg_actuated: Configuration of the actuated joints.
+
+        Returns:
+            Full configuration vector.
+        """
+        return self._map_to_full_joint_space(cfg_actuated, apply_offset=True)
+
+    @jdc.jit
+    def get_full_derivative(
+        self,
+        derivative_actuated: Float[Array, "*batch n_act_joints"],
+    ) -> Float[Array, "*batch n_joints"]:
+        """Compute the full joint derivative vector (velocity, acceleration, etc.)
+        for all n_joints from the derivative vector of the actuated joints (n_act_joints).
+
+        Handles fixed joints (derivative=0) and applies mimic joint relationships (multiplier only).
+
+        Args:
+            derivative_actuated: Derivative vector (e.g., velocity) of the actuated joints.
+
+        Returns:
+            Full derivative vector.
+        """
+        return self._map_to_full_joint_space(derivative_actuated, apply_offset=False)
 
 
 @jdc.pytree_dataclass
@@ -36,7 +134,7 @@ class LinkInfo:
 
     count: jdc.Static[int]
     names: jdc.Static[tuple[str, ...]]
-    parent_joint_indices: Int[Array, " count"]
+    parent_joint_indices: Int[Array, " n_links"]
 
 
 class RobotURDFParser:
@@ -55,20 +153,12 @@ class RobotURDFParser:
             - joint_order: Array of original joint indices sorted topologically.
         """
         original_joints = list(urdf.joint_map.values())
-        original_act_joints = list(urdf.actuated_joints)
         num_joints = len(original_joints)
-        num_act_joints = len(original_act_joints)
-
         original_name_to_idx = {j.name: i for i, j in enumerate(original_joints)}
-        original_act_name_to_idx = {
-            j.name: i for i, j in enumerate(original_act_joints)
-        }
 
         # Perform topological sort based on parent-child and mimic relationships.
         joints_to_sort = deepcopy(original_joints)
-        sorted_joint_objects = list[
-            yourdfpy.Joint
-        ]()  # Temporarily store sorted objects
+        sorted_joint_objects = list[yourdfpy.Joint]()
         parent_link_of_joint = {j.child: j.parent for j in joints_to_sort}
         child_link_of_joint = {j.name: j.child for j in joints_to_sort}
         mimic_map = {
@@ -113,32 +203,32 @@ class RobotURDFParser:
             dtype=jnp.int32,
         )
 
-        # Generate topological order for actuated joints based on original indices
-        act_joint_order_list = [
-            original_act_name_to_idx[j.name]
-            for j in sorted_joint_objects
-            if j.name in original_act_name_to_idx
-        ]
-
-        # Ensure the count matches
-        assert len(act_joint_order_list) == num_act_joints, (
-            f"Mismatch in actuated joint count during topological sort. "
-            f"Expected {num_act_joints}, found {len(act_joint_order_list)}"
-        )
+        if jnp.any(joint_order != jnp.arange(num_joints)):
+            logger.info(
+                "Joints were not in topological order; they will be internally sorted."
+            )
 
         return joint_order
 
     @staticmethod
     def parse(urdf: yourdfpy.URDF) -> tuple[JointInfo, LinkInfo]:
-        """Build joint and link information from a URDF in the original order."""
+        """Build joint and link information from a URDF."""
         joint_twists_list = list[Array]()
         parent_transform_list = list[Array]()
         parent_idx_list = list[int]()
         actuated_idx_list = list[int]()
-        lower_limit_list = list[float]()
-        upper_limit_list = list[float]()
+        lower_limit_act_list = list[float]()
+        upper_limit_act_list = list[float]()
+        velocity_limit_act_list = list[float]()
         joint_name_list = list[str]()
-        velocity_limit_list = list[float]()
+        mimic_multiplier_list = list[float]()
+        mimic_offset_list = list[float]()
+        is_mimic_list = list[bool]()
+
+        # Store limits read directly from URDF for *all* joints -> _eff
+        lower_limit_eff_list = list[float]()
+        upper_limit_eff_list = list[float]()
+        velocity_limit_eff_list = list[float]()
 
         # Link information.
         link_name_list = list[str]()
@@ -149,26 +239,38 @@ class RobotURDFParser:
             # Get joint names.
             joint_name_list.append(joint.name)
 
-            # Get the actuated joint index.
-            act_idx = RobotURDFParser._get_act_joint_idx(urdf, joint, joint_idx)
+            # Get twist for *this* joint (will be zero for fixed)
+            twist = RobotURDFParser._get_joint_twist(joint)
+            joint_twists_list.append(twist)
+
+            # Get the actuated joint index it refers to (could be itself or mimicked).
+            # Also get mimic parameters if applicable.
+            act_idx, is_mimic, multiplier, offset = (
+                RobotURDFParser._get_act_joint_idx_and_mimic(urdf, joint)
+            )
             actuated_idx_list.append(act_idx)
+            is_mimic_list.append(is_mimic)
+            mimic_multiplier_list.append(multiplier)
+            mimic_offset_list.append(offset)
 
-            # Get the twist parameters for all actuated joints.
-            if joint in urdf.actuated_joints:
-                twist = RobotURDFParser._get_act_joint_twist(joint)
-                joint_twists_list.append(twist)
+            # Get effective joint limits.
+            lower_eff, upper_eff = RobotURDFParser._get_joint_limits(joint)
+            vel_limit_eff = RobotURDFParser._get_joint_limit_vel(joint)
 
-                # Get the joint limits.
-                lower, upper = RobotURDFParser._get_joint_limits(joint)
-                lower_limit_list.append(lower)
-                upper_limit_list.append(upper)
+            lower_limit_eff_list.append(lower_eff)
+            upper_limit_eff_list.append(upper_eff)
+            velocity_limit_eff_list.append(vel_limit_eff)
 
-                # Get the joint velocities.
-                joint_vel_limit_val = RobotURDFParser._get_joint_limit_vel(joint)
-                velocity_limit_list.append(joint_vel_limit_val)
+            # Get directly actuated joint limits.
+            if joint in urdf.actuated_joints and not is_mimic:
+                lower_limit_act_list.append(lower_eff)
+                upper_limit_act_list.append(upper_eff)
+                velocity_limit_act_list.append(vel_limit_eff)
 
             # Get the parent joint index and transform for each joint.
-            parent_idx, T_parent_joint_val = RobotURDFParser._get_T_parent_joint(urdf, joint)
+            parent_idx, T_parent_joint_val = RobotURDFParser._get_T_parent_joint(
+                urdf, joint
+            )
             parent_idx_list.append(parent_idx)
             parent_transform_list.append(T_parent_joint_val)
 
@@ -183,6 +285,17 @@ class RobotURDFParser:
         # Calculate topological sort order
         topo_sort_inv_val = RobotURDFParser._topologically_sort_joints(urdf)
 
+        # Convert collected lists to arrays
+        lower_limits_act_arr = jnp.array(lower_limit_act_list)
+        upper_limits_act_arr = jnp.array(upper_limit_act_list)
+        velocity_limits_act_arr = jnp.array(velocity_limit_act_list)
+        actuated_indices_arr = jnp.array(actuated_idx_list, dtype=jnp.int32)
+        mimic_multiplier_arr = jnp.array(mimic_multiplier_list)
+        mimic_offset_arr = jnp.array(mimic_offset_list)
+        lower_limits_eff_arr = jnp.array(lower_limit_eff_list)
+        upper_limits_eff_arr = jnp.array(upper_limit_eff_list)
+        velocity_limits_eff_arr = jnp.array(velocity_limit_eff_list)
+
         # Create JointInfo and LinkInfo based on original order.
         joint_info = JointInfo(
             count=len(urdf.joint_map),
@@ -190,21 +303,33 @@ class RobotURDFParser:
             twists=jnp.array(joint_twists_list),
             parent_transforms=jnp.array(parent_transform_list),
             parent_indices=jnp.array(parent_idx_list, dtype=jnp.int32),
-            actuated_indices=jnp.array(actuated_idx_list, dtype=jnp.int32),
-            lower_limits=jnp.array(lower_limit_list),
-            upper_limits=jnp.array(upper_limit_list),
+            actuated_indices=actuated_indices_arr,
+            lower_limits_act=lower_limits_act_arr,
+            upper_limits_act=upper_limits_act_arr,
+            velocity_limits_act=velocity_limits_act_arr,
             names=tuple(joint_name_list),
-            velocity_limits=jnp.array(velocity_limit_list),
-            topo_sort_inv=topo_sort_inv_val,
+            lower_limits_eff=lower_limits_eff_arr,
+            upper_limits_eff=upper_limits_eff_arr,
+            velocity_limits_eff=velocity_limits_eff_arr,
+            mimic_multiplier=mimic_multiplier_arr,
+            mimic_offset=mimic_offset_arr,
+            is_mimic=jnp.array(is_mimic_list),
+            _topo_sort_inv=topo_sort_inv_val,
         )
-        assert joint_info.twists.shape == (joint_info.actuated_count, 6)
+        assert joint_info.twists.shape == (joint_info.count, 6)
         assert joint_info.parent_transforms.shape == (joint_info.count, 7)
         assert joint_info.parent_indices.shape == (joint_info.count,)
         assert joint_info.actuated_indices.shape == (joint_info.count,)
-        assert joint_info.lower_limits.shape == (joint_info.actuated_count,)
-        assert joint_info.upper_limits.shape == (joint_info.actuated_count,)
-        assert joint_info.velocity_limits.shape == (joint_info.actuated_count,)
-        assert joint_info.topo_sort_inv.shape == (joint_info.count,)
+        assert joint_info.lower_limits_act.shape == (joint_info.actuated_count,)
+        assert joint_info.upper_limits_act.shape == (joint_info.actuated_count,)
+        assert joint_info.velocity_limits_act.shape == (joint_info.actuated_count,)
+        assert joint_info.lower_limits_eff.shape == (joint_info.count,)
+        assert joint_info.upper_limits_eff.shape == (joint_info.count,)
+        assert joint_info.velocity_limits_eff.shape == (joint_info.count,)
+        assert joint_info._topo_sort_inv.shape == (joint_info.count,)
+        assert joint_info.mimic_multiplier.shape == (joint_info.count,)
+        assert joint_info.mimic_offset.shape == (joint_info.count,)
+        assert joint_info.is_mimic.shape == (joint_info.count,)
 
         link_info = LinkInfo(
             count=len(link_name_list),
@@ -215,40 +340,54 @@ class RobotURDFParser:
         return joint_info, link_info
 
     @staticmethod
-    def _get_act_joint_idx(
-        urdf: yourdfpy.URDF, joint: yourdfpy.Joint, joint_idx: int
-    ) -> int:
-        """Get the original actuated joint index for a joint."""
-        # Check if this joint is a mimic joint -- assume multiplier=1.0, offset=0.0.
-        if joint.mimic is not None:
-            mimicked_joint = urdf.joint_map[joint.mimic.joint]
-            # Check if the mimicked joint itself is actuated.
-            assert mimicked_joint in urdf.actuated_joints
-            # Return the *original index* of the mimicked actuated joint
-            mimicked_joint_idx = urdf.actuated_joints.index(mimicked_joint)
-            act_joint_idx = mimicked_joint_idx
+    def _get_act_joint_idx_and_mimic(
+        urdf: yourdfpy.URDF, joint: yourdfpy.Joint
+    ) -> tuple[int, bool, float, float]:
+        """Get the index of the actuated joint for a joint, and mimic parameters."""
+        is_mimic = False
+        multiplier = 1.0
+        offset = 0.0
 
-        # Track joint twists for actuated joints.
+        # Check if this joint is a mimic joint.
+        if joint.mimic is not None:
+            is_mimic = True
+            if joint.mimic.multiplier is not None:
+                multiplier = joint.mimic.multiplier
+            if joint.mimic.offset is not None:
+                offset = joint.mimic.offset
+
+            mimicked_joint_name = joint.mimic.joint
+            mimicked_joint = urdf.joint_map[mimicked_joint_name]
+            act_joint_idx = urdf.actuated_joints.index(mimicked_joint)
+
+        # If not mimic, check if it's directly actuated.
         elif joint in urdf.actuated_joints:
             assert joint.axis.shape == (3,)
-            # Return the *original index* of this actuated joint
             act_joint_idx = urdf.actuated_joints.index(joint)
 
-        # Not actuated.
+        # Otherwise, it's a fixed joint.
         else:
-            act_joint_idx = -1  # Represents non-actuated
+            act_joint_idx = -1  # Represents non-actuated/fixed.
 
-        return act_joint_idx
+        return act_joint_idx, is_mimic, multiplier, offset
 
     @staticmethod
-    def _get_act_joint_twist(joint: yourdfpy.Joint) -> Array:
-        """Get the twist parameters for an actuated joint."""
+    def _get_joint_twist(joint: yourdfpy.Joint) -> Array:
+        """Get the twist parameters for any joint (zero for fixed)."""
         if joint.type in ("revolute", "continuous"):
             twist = jnp.concatenate([jnp.zeros(3), joint.axis])
         elif joint.type == "prismatic":
             twist = jnp.concatenate([joint.axis, jnp.zeros(3)])
+        elif joint.type == "fixed":
+            twist = jnp.zeros(6)
         else:
-            raise ValueError(f"Unsupported joint type {joint.type}!")
+            # Floating joints etc. are not supported yet.
+            logger.warning(
+                f"Unsupported joint type {joint.type} encountered for joint '{joint.name}'. Treating as fixed."
+            )
+            twist = jnp.zeros(6)
+            # raise ValueError(f"Unsupported joint type {joint.type}!")
+        assert twist.shape == (6,)
         return twist
 
     @staticmethod
@@ -275,23 +414,45 @@ class RobotURDFParser:
 
     @staticmethod
     def _get_joint_limits(joint: yourdfpy.Joint) -> tuple[float, float]:
-        """Get the joint limits for an actuated joint, returns (lower, upper)."""
-        assert joint.limit is not None
-        if joint.limit.lower is not None and joint.limit.upper is not None:
-            lower = joint.limit.lower
-            upper = joint.limit.upper
+        """Get the joint limits defined in the URDF.
+        Assumes caller checked that joint.limit.lower/upper exist OR type is fixed/continuous.
+        """
+        if joint.type == "fixed":
+            return 0.0, 0.0
         elif joint.type == "continuous":
-            logger.warning("Continuous joint detected, cap to [-pi, pi] limits.")
-            lower = -jnp.pi
-            upper = jnp.pi
+            if (
+                joint.limit is not None
+                and joint.limit.lower is not None
+                and joint.limit.upper is not None
+            ):
+                return joint.limit.lower, joint.limit.upper
+            else:
+                logger.warning(
+                    f"Continuous joint '{joint.name}' has no explicit limits."
+                    "Returning [-pi, pi]."
+                )
+                return -jnp.pi, jnp.pi
+        elif (
+            joint.limit is not None
+            and joint.limit.lower is not None
+            and joint.limit.upper is not None
+        ):
+            return joint.limit.lower, joint.limit.upper
+        elif joint.type == "fixed":
+            return 0.0, 0.0
         else:
-            raise ValueError("We currently assume there are joint limits!")
-        return lower, upper
+            raise ValueError(f"Joint '{joint.name}' ({joint.type}) has no limits.")
 
     @staticmethod
     def _get_joint_limit_vel(joint: yourdfpy.Joint) -> float:
-        """Get the joint velocity for an actuated joint."""
-        if joint.limit is not None and joint.limit.velocity is not None:
+        """Get the joint velocity limit defined in the URDF.
+        Assumes checks for existence have been done prior to calling, or joint is fixed.
+        """
+        if joint.type == "fixed":
+            return 0.0
+        elif joint.limit is not None and joint.limit.velocity is not None:
             return joint.limit.velocity
-        logger.warning("Joint velocity not specified, defaulting to 1.0.")
-        return 1.0
+        else:
+            raise ValueError(
+                f"Joint '{joint.name}' of type '{joint.type}' has no velocity limits."
+            )
