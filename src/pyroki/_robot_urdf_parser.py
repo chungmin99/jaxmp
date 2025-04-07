@@ -15,25 +15,28 @@ import jaxlie
 class JointInfo:
     """Contains joint-related information for a robot."""
 
-    num_joints: jdc.Static[int]
-    num_actuated_joints: jdc.Static[int]
-    joint_twists: Float[Array, "act_joints 6"]
-    Ts_parent_joint: Float[Array, "joints 7"]
-    idx_parent_joint: Int[Array, " joints"]
-    idx_actuated_joint: Int[Array, " joints"]
-    limits_lower: Float[Array, " act_joints"]
-    limits_upper: Float[Array, " act_joints"]
-    joint_names: jdc.Static[tuple[str, ...]]
-    joint_vel_limit: Float[Array, " act_joints"]
+    count: jdc.Static[int]
+    actuated_count: jdc.Static[int]
+    twists: Float[Array, "actuated_count 6"]
+    parent_transforms: Float[Array, "count 7"]
+    parent_indices: Int[Array, " count"]
+    actuated_indices: Int[Array, " count"]
+    lower_limits: Float[Array, " actuated_count"]
+    upper_limits: Float[Array, " actuated_count"]
+    names: jdc.Static[tuple[str, ...]]
+    velocity_limits: Float[Array, " actuated_count"]
+
+    topo_sort_inv: Int[Array, " count"]
+    """Inverse topological sort order, mapping sorted joint index to original joint index."""
 
 
 @jdc.pytree_dataclass
 class LinkInfo:
     """Contains link-related information for a robot."""
 
-    num_links: jdc.Static[int]
-    link_names: jdc.Static[tuple[str, ...]]
-    idx_link_parent: Int[Array, " links"]
+    count: jdc.Static[int]
+    names: jdc.Static[tuple[str, ...]]
+    parent_joint_indices: Int[Array, " count"]
 
 
 class RobotURDFParser:
@@ -63,10 +66,14 @@ class RobotURDFParser:
 
         # Perform topological sort based on parent-child and mimic relationships.
         joints_to_sort = deepcopy(original_joints)
-        sorted_joint_objects = list[yourdfpy.Joint]() # Temporarily store sorted objects
+        sorted_joint_objects = list[
+            yourdfpy.Joint
+        ]()  # Temporarily store sorted objects
         parent_link_of_joint = {j.child: j.parent for j in joints_to_sort}
         child_link_of_joint = {j.name: j.child for j in joints_to_sort}
-        mimic_map = {j.name: j.mimic.joint for j in joints_to_sort if j.mimic is not None}
+        mimic_map = {
+            j.name: j.mimic.joint for j in joints_to_sort if j.mimic is not None
+        }
 
         processed_child_links = set()
         processed_joint_names = set()
@@ -103,7 +110,7 @@ class RobotURDFParser:
         # Generate the topological order based on original indices
         joint_order = jnp.array(
             [original_name_to_idx[j.name] for j in sorted_joint_objects],
-            dtype=jnp.int32
+            dtype=jnp.int32,
         )
 
         # Generate topological order for actuated joints based on original indices
@@ -124,73 +131,87 @@ class RobotURDFParser:
     @staticmethod
     def parse(urdf: yourdfpy.URDF) -> tuple[JointInfo, LinkInfo]:
         """Build joint and link information from a URDF in the original order."""
-        joint_twists = list[Array]()
-        Ts_parent_joint = list[Array]()
-        idx_parent_joint = list[int]()
-        idx_actuated_joint = list[int]()
-        limits_lower = list[float]()
-        limits_upper = list[float]()
-        joint_names = list[str]()
-        joint_vel_limits = list[float]()
+        joint_twists_list = list[Array]()
+        parent_transform_list = list[Array]()
+        parent_idx_list = list[int]()
+        actuated_idx_list = list[int]()
+        lower_limit_list = list[float]()
+        upper_limit_list = list[float]()
+        joint_name_list = list[str]()
+        velocity_limit_list = list[float]()
 
         # Link information.
-        link_names = list[str]()
-        idx_link_parent = list[int]()
+        link_name_list = list[str]()
+        parent_joint_idx_list = list[int]()
 
         # First pass: collect joint information.
         for joint_idx, joint in enumerate(urdf.joint_map.values()):
             # Get joint names.
-            joint_names.append(joint.name)
+            joint_name_list.append(joint.name)
 
             # Get the actuated joint index.
             act_idx = RobotURDFParser._get_act_joint_idx(urdf, joint, joint_idx)
-            idx_actuated_joint.append(act_idx)
+            actuated_idx_list.append(act_idx)
 
             # Get the twist parameters for all actuated joints.
             if joint in urdf.actuated_joints:
                 twist = RobotURDFParser._get_act_joint_twist(joint)
-                joint_twists.append(twist)
+                joint_twists_list.append(twist)
 
                 # Get the joint limits.
                 lower, upper = RobotURDFParser._get_joint_limits(joint)
-                limits_lower.append(lower)
-                limits_upper.append(upper)
+                lower_limit_list.append(lower)
+                upper_limit_list.append(upper)
 
                 # Get the joint velocities.
-                joint_vel_limit = RobotURDFParser._get_joint_limit_vel(joint)
-                joint_vel_limits.append(joint_vel_limit)
+                joint_vel_limit_val = RobotURDFParser._get_joint_limit_vel(joint)
+                velocity_limit_list.append(joint_vel_limit_val)
 
             # Get the parent joint index and transform for each joint.
-            parent_idx, T_parent_joint = RobotURDFParser._get_T_parent_joint(urdf, joint)
-            idx_parent_joint.append(parent_idx)
-            Ts_parent_joint.append(T_parent_joint)
+            parent_idx, T_parent_joint_val = RobotURDFParser._get_T_parent_joint(urdf, joint)
+            parent_idx_list.append(parent_idx)
+            parent_transform_list.append(T_parent_joint_val)
 
         # Second pass: collect link information.
         for joint_idx, joint in enumerate(urdf.joint_map.values()):
             curr_link = joint.child
             # Ensure the link exists in the map before adding.
             if curr_link in urdf.link_map:
-                link_names.append(curr_link)
-                idx_link_parent.append(joint_idx)
+                link_name_list.append(curr_link)
+                parent_joint_idx_list.append(joint_idx)
+
+        # Calculate topological sort order
+        topo_sort_inv_val = RobotURDFParser._topologically_sort_joints(urdf)
 
         # Create JointInfo and LinkInfo based on original order.
         joint_info = JointInfo(
-            num_joints=len(urdf.joint_map),
-            num_actuated_joints=len(urdf.actuated_joints),
-            joint_twists=jnp.array(joint_twists),
-            Ts_parent_joint=jnp.array(Ts_parent_joint),
-            idx_parent_joint=jnp.array(idx_parent_joint, dtype=jnp.int32),
-            idx_actuated_joint=jnp.array(idx_actuated_joint, dtype=jnp.int32),
-            limits_lower=jnp.array(limits_lower),
-            limits_upper=jnp.array(limits_upper),
-            joint_names=tuple(joint_names),
-            joint_vel_limit=jnp.array(joint_vel_limits),
+            count=len(urdf.joint_map),
+            actuated_count=len(urdf.actuated_joints),
+            twists=jnp.array(joint_twists_list),
+            parent_transforms=jnp.array(parent_transform_list),
+            parent_indices=jnp.array(parent_idx_list, dtype=jnp.int32),
+            actuated_indices=jnp.array(actuated_idx_list, dtype=jnp.int32),
+            lower_limits=jnp.array(lower_limit_list),
+            upper_limits=jnp.array(upper_limit_list),
+            names=tuple(joint_name_list),
+            velocity_limits=jnp.array(velocity_limit_list),
+            topo_sort_inv=topo_sort_inv_val,
         )
+        assert joint_info.twists.shape == (joint_info.actuated_count, 6)
+        assert joint_info.parent_transforms.shape == (joint_info.count, 7)
+        assert joint_info.parent_indices.shape == (joint_info.count,)
+        assert joint_info.actuated_indices.shape == (joint_info.count,)
+        assert joint_info.lower_limits.shape == (joint_info.actuated_count,)
+        assert joint_info.upper_limits.shape == (joint_info.actuated_count,)
+        assert joint_info.velocity_limits.shape == (joint_info.actuated_count,)
+        assert joint_info.topo_sort_inv.shape == (joint_info.count,)
+
         link_info = LinkInfo(
-            num_links=len(link_names),
-            link_names=tuple(link_names),
-            idx_link_parent=jnp.array(idx_link_parent, dtype=jnp.int32),
+            count=len(link_name_list),
+            names=tuple(link_name_list),
+            parent_joint_indices=jnp.array(parent_joint_idx_list, dtype=jnp.int32),
         )
+        assert link_info.parent_joint_indices.shape == (link_info.count,)
         return joint_info, link_info
 
     @staticmethod
@@ -210,12 +231,12 @@ class RobotURDFParser:
         # Track joint twists for actuated joints.
         elif joint in urdf.actuated_joints:
             assert joint.axis.shape == (3,)
-             # Return the *original index* of this actuated joint
+            # Return the *original index* of this actuated joint
             act_joint_idx = urdf.actuated_joints.index(joint)
 
         # Not actuated.
         else:
-            act_joint_idx = -1 # Represents non-actuated
+            act_joint_idx = -1  # Represents non-actuated
 
         return act_joint_idx
 

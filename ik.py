@@ -43,7 +43,7 @@ def solve_ik(
         pk.LimitCost.make(
             robot,
             joint_var,
-            weights=jnp.array([100.0] * robot.joint_info.num_actuated_joints),
+            weights=jnp.array([100.0] * robot.joint.actuated_count),
         ),
     ]
     sol = pk.solve(vars, factors)
@@ -64,9 +64,9 @@ def main(
     )
     logger.info(
         "Loaded robot with {} joints, {} actuated joints, and {} links.",
-        robot.joint_info.num_joints,
-        robot.joint_info.num_actuated_joints,
-        robot.link_info.num_links,
+        robot.joint.count,
+        robot.joint.actuated_count,
+        robot.link.count,
     )
 
     server = viser.ViserServer()
@@ -85,8 +85,8 @@ def main(
         idx = len(target_name_handles)
         target_name_handle = server.gui.add_dropdown(
             f"target joint {idx}",
-            list(urdf.joint_names),
-            initial_value=urdf.joint_names[0],
+            list(robot.joint.names),
+            initial_value=robot.joint.names[0],
         )
         target_tf_handle = server.scene.add_transform_controls(
             f"target_transform_{idx}", scale=0.2
@@ -107,7 +107,7 @@ def main(
     while True:
         target_joint_indices = jnp.array(
             [
-                robot.joint_info.joint_names.index(target_name_handles[i].value)
+                robot.joint.names.index(target_name_handles[i].value)
                 for i in range(len(target_name_handles))
             ]
         )
