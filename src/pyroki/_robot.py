@@ -1,18 +1,13 @@
-# pylint: disable=invalid-name
-
 from __future__ import annotations
-
-from typing import Optional
 
 import jax
 import jax_dataclasses as jdc
 import jaxlie
 import yourdfpy
-from loguru import logger
 
 from jax import Array
 from jax import numpy as jnp
-from jaxtyping import Float
+from jaxtyping import Float, Int
 
 import jaxls
 
@@ -35,41 +30,46 @@ class Robot:
     JointVar: jdc.Static[type[jaxls.Var[Array]]]
     """Variable class for the robot configuration."""
 
-    _act_joint_sort_order: Float[Array, " act_joints"]
-    """Sort order for the actuated joints, used for undoing the topological sort."""
-
-    _joint_sort_order: Float[Array, " joints"]
-    """Sort order for the joints, used for undoing the topological sort."""
+    _joint_sort_order_inv: Int[Array, " joints"]
+    """Inverse topological sort order for the joints (maps sorted idx -> original idx)."""
 
     @staticmethod
     def from_urdf(
         urdf: yourdfpy.URDF,
         unroll_fk: bool = False,
-        *,
-        act_joint_sort_order: Optional[Float[Array, " act_joints"]] = None,
-        joint_sort_order: Optional[Float[Array, " joints"]] = None,
     ) -> Robot:
-        joint_info, link_info = RobotURDFParser.parse(urdf)
+        """
+        Loads a robot kinematic tree from a URDF.
+        Internally tracks a topological sort of the joints.
 
-        if act_joint_sort_order is None:
-            act_joint_sort_order = jnp.arange(joint_info.num_actuated_joints)
-        if joint_sort_order is None:
-            joint_sort_order = jnp.arange(joint_info.num_joints)
+        Args:
+            urdf: The URDF to load the robot from.
+            unroll_fk: Whether to unroll the forward kinematics loop (`fori_loop`).
+        """
+        # 1. Parse URDF in original order.
+        joint_info_orig, link_info_orig = RobotURDFParser.parse(urdf)
+
+        # 2. Get topological sort information.
+        joint_sort_order_inv = RobotURDFParser._topologically_sort_joints(urdf)
+
+        # 3. Create Robot instance.
+        default_val = (joint_info_orig.limits_lower + joint_info_orig.limits_upper) / 2
 
         JointVar = Robot.get_joint_var_class(
-            default_val=(joint_info.limits_lower + joint_info.limits_upper) / 2,
-            num_actuated_joints=joint_info.num_actuated_joints,
-            joint_vel_limit=joint_info.joint_vel_limit,
+            default_val=default_val,
+            num_actuated_joints=joint_info_orig.num_actuated_joints,
+            joint_vel_limit=joint_info_orig.joint_vel_limit,
         )
 
-        return Robot(
-            joint_info=joint_info,
-            link_info=link_info,
+        robot = Robot(
+            joint_info=joint_info_orig,
+            link_info=link_info_orig,
             unroll_fk=unroll_fk,
             JointVar=JointVar,
-            _act_joint_sort_order=act_joint_sort_order,
-            _joint_sort_order=joint_sort_order,
+            _joint_sort_order_inv=joint_sort_order_inv,
         )
+
+        return robot
 
     @jdc.jit
     def forward_kinematics(
@@ -103,32 +103,66 @@ class Robot:
             Ts_joint_child[..., self.joint_info.idx_actuated_joint, :],
         )
         Ts_parent_child = (
-            jaxlie.SE3(self.joint_info.Ts_parent_joint) @ jaxlie.SE3(Ts_joint_child)
+            jaxlie.SE3(self.joint_info.Ts_parent_joint)
+            @ jaxlie.SE3(Ts_joint_child)
         ).wxyz_xyz
 
-        def compute_joint(i: int, Ts_world_joint: Array) -> Array:
-            T_world_parent = jnp.where(
-                self.joint_info.idx_parent_joint[i] == -1,
-                jaxlie.SE3.identity().wxyz_xyz,
-                Ts_world_joint[..., self.joint_info.idx_parent_joint[i], :],
-            )
+        # In this function we leverage two index mappings:
+        # 1. sort_order: map original_idx -> sorted_idx.
+        # 2. self._joint_sort_order_inv: map sorted_idx -> original_idx.
+        # We use these mappings to convert between the original and topologically sorted orderings.
 
-            return Ts_world_joint.at[..., i, :].set(
+        # 1. Calculate topological sort order (original -> sorted).
+        topo_order = jnp.argsort(self._joint_sort_order_inv)
+
+        # 2. Convert Ts_parent_child to topologically sorted order.
+        # This is slightly counterintuitive:
+        #   output[..., i, :] gets populated with the value from input[..., _joint_sort_order_inv[i], :].
+        #   Since _joint_sort_order_inv[i] gives the original index for sorted index i,
+        #   this correctly gathers the transforms from their original positions into the new sorted order.
+        Ts_parent_child_sorted = Ts_parent_child[..., self._joint_sort_order_inv, :]
+
+        # 3. Calculate parent's original_idx for each child's sorted_idx.
+        parent_orig_for_sorted_child = self.joint_info.idx_parent_joint[self._joint_sort_order_inv]
+
+        # 4. Calculate parent's sorted_idx for each child's sorted_idx.
+        idx_parent_joint_sorted = jnp.where(
+            parent_orig_for_sorted_child == -1,
+            -1,
+            topo_order[parent_orig_for_sorted_child],
+        )
+
+        # 5. Compute transforms, within topologically sorted order.
+        def compute_joint(i: int, Ts_world_joint_sorted: Array) -> Array:
+            parent_sorted_idx = idx_parent_joint_sorted[i]
+            T_world_parent = jnp.where(
+                parent_sorted_idx == -1,
+                jaxlie.SE3.identity().wxyz_xyz,
+                Ts_world_joint_sorted[..., parent_sorted_idx, :],
+            )
+            return Ts_world_joint_sorted.at[..., i, :].set(
                 (
-                    jaxlie.SE3(T_world_parent) @ jaxlie.SE3(Ts_parent_child[..., i, :])
+                    jaxlie.SE3(T_world_parent) @ jaxlie.SE3(Ts_parent_child_sorted[..., i, :])
                 ).wxyz_xyz
             )
 
-        Ts_world_parent = jnp.zeros((*batch_axes, self.joint_info.num_joints, 7))
-        Ts_world_joint = jax.lax.fori_loop(
+        Ts_world_joint_init_sorted = jnp.zeros((*batch_axes, self.joint_info.num_joints, 7))
+        Ts_world_joint_sorted = jax.lax.fori_loop(
             lower=0,
             upper=self.joint_info.num_joints,
             body_fun=compute_joint,
-            init_val=Ts_world_parent,
+            init_val=Ts_world_joint_init_sorted,
             unroll=self.unroll_fk,
         )
 
-        assert Ts_world_joint.shape == (*batch_axes, self.joint_info.num_joints, 7)
+        # 6. Gather elements into original order using sort_order (original_idx -> sorted_idx).
+        Ts_world_joint = Ts_world_joint_sorted[..., topo_order, :]
+        assert Ts_world_joint.shape == (
+            *batch_axes,
+            self.joint_info.num_joints,
+            7,
+        )
+
         return Ts_world_joint
 
     @jdc.jit
@@ -136,9 +170,11 @@ class Robot:
         self,
         cfg: Float[Array, "*batch num_act_joints"],
     ) -> Float[Array, "*batch num_links 7"]:
-        """Run forward kinematics on the robot's links, in the provided configuration."""
-        Ts_world_joint = self.forward_kinematics(cfg)
-        return Ts_world_joint[..., self.link_info.idx_link_parent, :]
+        """Run forward kinematics on the robot's links, in the provided configuration.
+
+        Returns transforms in the order corresponding to `self.link_info.link_names`.
+        """
+        raise NotImplementedError
 
     @staticmethod
     def get_joint_var_class(
