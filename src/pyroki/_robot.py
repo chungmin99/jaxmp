@@ -45,11 +45,12 @@ class Robot:
         """
         joint, link = RobotURDFParser.parse(urdf)
 
-        default_val = (joint.lower_limits + joint.upper_limits) / 2
+        # Use actuated limits for default value and retract scaling
+        default_val = (joint.lower_limits_act + joint.upper_limits_act) / 2
         JointVar = Robot.get_joint_var_class(
             default_val=default_val,
             num_actuated_joints=joint.actuated_count,
-            joint_vel_limit=joint.velocity_limits,
+            joint_vel_limit=joint.velocity_limits_act,
         )
 
         robot = Robot(
@@ -78,24 +79,17 @@ class Robot:
         batch_axes = cfg.shape[:-1]
         assert cfg.shape == (*batch_axes, self.joint.actuated_count)
 
-        Ts_joint_child = jaxlie.SE3.exp(
-            self.joint.twists * cfg[..., None]
-        ).wxyz_xyz
-        assert Ts_joint_child.shape == (
-            *batch_axes,
-            self.joint.actuated_count,
-            7,
-        )
+        # Calculate full configuration using the dedicated method
+        q_full = self.joint.get_full_config(cfg)
 
-        Ts_joint_child = jnp.where(
-            (self.joint.actuated_indices == -1)[..., None],
-            jaxlie.SE3.identity().wxyz_xyz,
-            Ts_joint_child[..., self.joint.actuated_indices, :],
-        )
-        Ts_parent_child = (
-            jaxlie.SE3(self.joint.parent_transforms)
-            @ jaxlie.SE3(Ts_joint_child)
-        ).wxyz_xyz
+        # Calculate delta transforms using the effective config and twists for all joints.
+        tangents = self.joint.twists * q_full[..., None]
+        assert tangents.shape == (*batch_axes, self.joint.count, 6)
+        delta_Ts = jaxlie.SE3.exp(tangents)  # Shape: (*batch_axes, self.joint.count, 7)
+
+        # Combine constant parent transform with variable joint delta transform.
+        Ts_parent_child = (jaxlie.SE3(self.joint.parent_transforms) @ delta_Ts).wxyz_xyz
+        assert Ts_parent_child.shape == (*batch_axes, self.joint.count, 7)
 
         # In this function we leverage two index mappings:
         # 1. sort_order: map original_idx -> sorted_idx.
@@ -103,17 +97,19 @@ class Robot:
         # We use these mappings to convert between the original and topologically sorted orderings.
 
         # 1. Calculate topological sort order (original -> sorted).
-        topo_order = jnp.argsort(self.joint.topo_sort_inv)
+        topo_order = jnp.argsort(self.joint._topo_sort_inv)
 
         # 2. Convert Ts_parent_child to topologically sorted order.
         # This is slightly counterintuitive:
         #   output[..., i, :] gets populated with the value from input[..., self.joint.topo_sort_inv[i], :].
         #   Since self.joint.topo_sort_inv[i] gives the original index for sorted index i,
         #   this correctly gathers the transforms from their original positions into the new sorted order.
-        Ts_parent_child_sorted = Ts_parent_child[..., self.joint.topo_sort_inv, :]
+        Ts_parent_child_sorted = Ts_parent_child[..., self.joint._topo_sort_inv, :]
 
         # 3. Calculate parent's original_idx for each child's sorted_idx.
-        parent_orig_for_sorted_child = self.joint.parent_indices[self.joint.topo_sort_inv]
+        parent_orig_for_sorted_child = self.joint.parent_indices[
+            self.joint._topo_sort_inv
+        ]
 
         # 4. Calculate parent's sorted_idx for each child's sorted_idx.
         idx_parent_joint_sorted = jnp.where(
@@ -171,7 +167,7 @@ class Robot:
     def get_joint_var_class(
         default_val: Float[Array, "* actuated_count"],
         num_actuated_joints: int,
-        joint_vel_limit: Float[Array, "* actuated_count"],
+        joint_vel_limit: Float[Array, " actuated_count"],
     ) -> type[jaxls.Var[Array]]:
         """Return a variable class for the robot configuration,
         considering different joint units for revolute/prismatic joints."""
@@ -186,8 +182,7 @@ class Robot:
             assert cfg.shape[-1] == num_actuated_joints
 
             # Apply units to delta, by normalizing w/ the joint velocity.
-            # Important for robots with both revolute + prismatic joints
-            # (e.g., fetch, robot grippers).
+            # Uses the velocity limits of the *actuated* joints.
             _delta = delta * joint_vel_limit * 0.01
 
             return cfg + _delta
