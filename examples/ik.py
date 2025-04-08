@@ -32,7 +32,7 @@ def solve_ik(
     rot_weight: float = 1.0,
     rest_weight: float = 0.01,
     limit_weight: float = 100.0,
-    manipulability_weight: float = 0.001,
+    manipulability_weight: float | None = None,
     max_iterations: int = 1,
 ) -> jax.Array:
     """
@@ -58,13 +58,18 @@ def solve_ik(
             joint_var,
             weights=jnp.array([rest_weight]),
         ),
-        pk.ManipulabilityCost.make(
-            robot,
-            joint_var,
-            target_joint_indices,
-            weights=jnp.array([manipulability_weight]),
-        ),
     ]
+
+    if manipulability_weight is not None:
+        factors.append(
+            pk.ManipulabilityCost.make(
+                robot,
+                joint_var,
+                target_joint_indices,
+                weights=jnp.array([manipulability_weight]),
+            ),
+        )
+
     if init_joints is not None:
         init_vars = [joint_var.with_value(init_joints)]
     else:
@@ -82,7 +87,7 @@ def main(
     # Set device.
     jax.config.update("jax_platform_name", device)
 
-    # Load robot description.
+    # Load robot.
     urdf, robot = pk.load_robot(
         robot_urdf_path=robot_urdf_path, robot_description=robot_description
     )
@@ -93,6 +98,7 @@ def main(
         robot.link.count,
     )
 
+    # Visualization code.
     server = viser.ViserServer()
     server.scene.configure_default_lights()
     urdf_vis = BatchedURDF(server, urdf, root_node_name="/base")
@@ -104,7 +110,7 @@ def main(
         rot_weight_handle = server.gui.add_slider("Rotation", 0.0, 10.0, 0.1, 1.0)
         limit_weight_handle = server.gui.add_slider("Limit", 0.0, 100.0, 0.1, 100.0)
         manipulability_weight_handle = server.gui.add_slider(
-            "Manipulability", 0.0, 0.01, 0.001, 0.001
+            "Manipulability", 0.0, 0.01, 0.001, 0.0
         )
         rest_weight_handle = server.gui.add_slider("Rest", 0.0, 0.1, 0.001, 0.01)
     timing_handle = server.gui.add_number("Time (ms)", 0.01, disabled=True)
@@ -163,6 +169,11 @@ def main(
             max_iter = 100
             init_joints = None
 
+        if manipulability_weight_handle.value > 0:
+            manipulability_weight = manipulability_weight_handle.value
+        else:
+            manipulability_weight = None
+
         start = time.time()
         joints = solve_ik(
             robot,
@@ -173,7 +184,7 @@ def main(
             rot_weight=rot_weight_handle.value,
             limit_weight=limit_weight_handle.value,
             rest_weight=rest_weight_handle.value,
-            manipulability_weight=manipulability_weight_handle.value,
+            manipulability_weight=manipulability_weight,
             max_iterations=max_iter,
         )
         jax.block_until_ready(joints)
