@@ -27,6 +27,7 @@ class JointInfo:
     parent_indices: Int[Array, " n_joints"]
     """Index of the parent joint for each joint. Shape: (n_joints,)."""
     actuated_indices: Int[Array, " n_joints"]
+    """Index of the associated actuated joint that drives each joint. Shape: (n_joints,)."""
 
     # Limits for directly actuated joints.
     lower_limits_act: Float[Array, " n_act_joints"]
