@@ -15,6 +15,7 @@ import jaxls
 def solve(
     vars: list[jaxls.Var],
     factors: list[CostFactor],
+    init_vars: list,
     *,
     solver_type: Literal[
         "cholmod", "conjugate_gradient", "dense_cholesky"
@@ -24,11 +25,18 @@ def solve(
 ) -> jaxls.VarValues:
     """Solve the robot kinematic optimization problem."""
     factors_jaxls = [cf._make_factor() for cf in factors]
+    if len(init_vars) != len(vars):
+        if len(init_vars) == 0:
+            init_vars = vars
+        else:
+            raise ValueError(
+                f"Number of initial variables ({len(init_vars)}) must match number of variables ({len(vars)})."
+            )
 
     graph = jaxls.FactorGraph.make(factors_jaxls, vars, use_onp=False)
     solution = graph.solve(
         linear_solver=solver_type,
-        initial_vals=jaxls.VarValues.make(vars),
+        initial_vals=jaxls.VarValues.make(init_vars),
         trust_region=jaxls.TrustRegionConfig(),
         termination=jaxls.TerminationConfig(
             gradient_tolerance=1e-5,

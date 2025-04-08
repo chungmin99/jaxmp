@@ -26,12 +26,14 @@ def solve_ik(
     robot: pk.Robot,
     target_pose: jaxlie.SE3,
     target_joint_indices: jnp.ndarray,
+    init_joints: Optional[jnp.ndarray],
     *,
     pos_weight: float = 5.0,
     rot_weight: float = 1.0,
     rest_weight: float = 0.01,
     limit_weight: float = 100.0,
     manipulability_weight: float = 0.001,
+    max_iterations: int = 1,
 ) -> jax.Array:
     """
     Solve the robot inverse kinematics problem, using PyRoki.
@@ -63,7 +65,12 @@ def solve_ik(
             weights=jnp.array([manipulability_weight]),
         ),
     ]
-    sol = pk.solve(vars, factors)
+    if init_joints is not None:
+        init_vars = [joint_var.with_value(init_joints)]
+    else:
+        init_vars = [joint_var]
+
+    sol = pk.solve(vars, factors, init_vars=init_vars, max_iterations=max_iterations)
     return sol[joint_var]
 
 
@@ -91,6 +98,7 @@ def main(
     urdf_vis = BatchedURDF(server, urdf, root_node_name="/base")
     server.scene.add_grid("/grid", width=2, height=2, cell_size=0.1)
 
+    smooth_handle = server.gui.add_checkbox("DiffIK", initial_value=False)
     with server.gui.add_folder("Cost weights"):
         pos_weight_handle = server.gui.add_slider("Position", 0.0, 50.0, 0.1, 5.0)
         rot_weight_handle = server.gui.add_slider("Rotation", 0.0, 10.0, 0.1, 1.0)
@@ -129,6 +137,7 @@ def main(
     add_joint_button.on_click(lambda _: add_joint())
     add_joint()
 
+    joints = (robot.joint.upper_limits_act + robot.joint.lower_limits_act) / 2
     while True:
         target_joint_indices = jnp.array(
             [
@@ -147,16 +156,25 @@ def main(
             )
         )
 
+        if smooth_handle.value:
+            max_iter = 1
+            init_joints = joints
+        else:
+            max_iter = 100
+            init_joints = None
+
         start = time.time()
         joints = solve_ik(
             robot,
             target_poses,
             target_joint_indices,
+            init_joints=init_joints,
             pos_weight=pos_weight_handle.value,
             rot_weight=rot_weight_handle.value,
             limit_weight=limit_weight_handle.value,
             rest_weight=rest_weight_handle.value,
             manipulability_weight=manipulability_weight_handle.value,
+            max_iterations=max_iter,
         )
         jax.block_until_ready(joints)
         end = time.time()
