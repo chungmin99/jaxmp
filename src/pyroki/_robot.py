@@ -156,12 +156,18 @@ class Robot:
     def forward_kinematics_links(
         self,
         cfg: Float[Array, "*batch actuated_count"],
-    ) -> Float[Array, "*batch count 7"]:
+    ) -> Float[Array, "*batch link_count 7"]:
         """Run forward kinematics on the robot's links, in the provided configuration.
 
         Returns transforms in the order corresponding to `self.link.names`.
         """
-        raise NotImplementedError
+        Ts_joint_world = self.forward_kinematics(cfg)
+        Ts_link_world = jnp.where(
+            (self.link.parent_joint_indices == -1)[..., None],
+            jaxlie.SE3.identity().wxyz_xyz,
+            Ts_joint_world[..., self.link.parent_joint_indices, :],
+        )
+        return Ts_link_world
 
     @staticmethod
     def get_joint_var_class(

@@ -18,6 +18,7 @@ import jax_dataclasses as jdc
 import numpy as onp
 
 import pyroki as pk
+from pyroki.viewer._batched_urdf import BatchedURDF
 
 
 @jdc.jit
@@ -25,6 +26,12 @@ def solve_ik(
     robot: pk.Robot,
     target_pose: jaxlie.SE3,
     target_joint_indices: jnp.ndarray,
+    *,
+    pos_weight: float = 5.0,
+    rot_weight: float = 1.0,
+    rest_weight: float = 0.01,
+    limit_weight: float = 100.0,
+    manipulability_weight: float = 0.001,
 ) -> jax.Array:
     """
     Solve the robot inverse kinematics problem, using PyRoki.
@@ -38,12 +45,22 @@ def solve_ik(
             joint_var,
             target_pose,
             target_joint_indices,
-            weights=jnp.array([5.0] * 3 + [1.0] * 3),
+            weights=jnp.array([pos_weight] * 3 + [rot_weight] * 3),
         ),
         pk.LimitCost.make(
             robot,
             joint_var,
-            weights=jnp.array([100.0] * robot.joint.count),
+            weights=jnp.array([limit_weight] * robot.joint.count),
+        ),
+        pk.RestCost.make(
+            joint_var,
+            weights=jnp.array([rest_weight]),
+        ),
+        pk.ManipulabilityCost.make(
+            robot,
+            joint_var,
+            target_joint_indices,
+            weights=jnp.array([manipulability_weight]),
         ),
     ]
     sol = pk.solve(vars, factors)
@@ -71,9 +88,17 @@ def main(
 
     server = viser.ViserServer()
     server.scene.configure_default_lights()
-    urdf_vis = viser.extras.ViserUrdf(server, urdf, root_node_name="/base")
+    urdf_vis = BatchedURDF(server, urdf, root_node_name="/base")
     server.scene.add_grid("/grid", width=2, height=2, cell_size=0.1)
 
+    with server.gui.add_folder("Cost weights"):
+        pos_weight_handle = server.gui.add_slider("Position", 0.0, 50.0, 0.1, 5.0)
+        rot_weight_handle = server.gui.add_slider("Rotation", 0.0, 10.0, 0.1, 1.0)
+        limit_weight_handle = server.gui.add_slider("Limit", 0.0, 100.0, 0.1, 100.0)
+        manipulability_weight_handle = server.gui.add_slider(
+            "Manipulability", 0.0, 0.01, 0.001, 0.001
+        )
+        rest_weight_handle = server.gui.add_slider("Rest", 0.0, 0.1, 0.001, 0.01)
     timing_handle = server.gui.add_number("Time (ms)", 0.01, disabled=True)
     add_joint_button = server.gui.add_button("Add joint")
 
@@ -123,12 +148,21 @@ def main(
         )
 
         start = time.time()
-        joints = solve_ik(robot, target_poses, target_joint_indices)
+        joints = solve_ik(
+            robot,
+            target_poses,
+            target_joint_indices,
+            pos_weight=pos_weight_handle.value,
+            rot_weight=rot_weight_handle.value,
+            limit_weight=limit_weight_handle.value,
+            rest_weight=rest_weight_handle.value,
+            manipulability_weight=manipulability_weight_handle.value,
+        )
         jax.block_until_ready(joints)
         end = time.time()
 
         timing_handle.value = (end - start) * 1000
-        urdf_vis.update_cfg(onp.array(joints))
+        urdf_vis.update_cfg(joints)
 
         Ts_joint_world = robot.forward_kinematics(joints)
         for i in range(len(target_name_handles)):

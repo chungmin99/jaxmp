@@ -275,12 +275,14 @@ class RobotURDFParser:
             parent_transform_list.append(T_parent_joint_val)
 
         # Second pass: collect link information.
-        for joint_idx, joint in enumerate(urdf.joint_map.values()):
-            curr_link = joint.child
-            # Ensure the link exists in the map before adding.
-            if curr_link in urdf.link_map:
-                link_name_list.append(curr_link)
+        joint_from_link = {j.child: j for j in urdf.joint_map.values()}
+        for link_name in urdf.link_map:
+            link_name_list.append(link_name)
+            if link_name in joint_from_link:
+                joint_idx = joint_name_list.index(joint_from_link[link_name].name)
                 parent_joint_idx_list.append(joint_idx)
+            else:
+                parent_joint_idx_list.append(-1)
 
         # Calculate topological sort order
         topo_sort_inv_val = RobotURDFParser._topologically_sort_joints(urdf)
@@ -428,7 +430,7 @@ class RobotURDFParser:
                 return joint.limit.lower, joint.limit.upper
             else:
                 logger.warning(
-                    f"Continuous joint '{joint.name}' has no explicit limits."
+                    f"Continuous joint '{joint.name}' has no explicit limits. "
                     "Returning [-pi, pi]."
                 )
                 return -jnp.pi, jnp.pi

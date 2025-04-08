@@ -21,7 +21,7 @@ class PoseCost(CostFactor[Robot, jaxls.Var[Array], jaxlie.SE3, Array]):
         joint_cfg = vals[joint_var]
         Ts_joint_world = robot.forward_kinematics(joint_cfg)
         pose = jaxlie.SE3(Ts_joint_world[target_joint_indices])
-        residual = (pose @ target_pose.inverse()).log()
+        residual = (pose.inverse() @ target_pose).log()
         return residual
 
 
@@ -44,7 +44,7 @@ class PoseCostWithBase(
         T_base_target = jaxlie.SE3(Ts_joint_world[target_joint_indices])
         T_world_target_desired = T_world_base @ T_base_target
 
-        residual = (T_world_target_desired @ T_world_target.inverse()).log()
+        residual = (T_world_target_desired.inverse() @ T_world_target).log()
         return residual
 
 
