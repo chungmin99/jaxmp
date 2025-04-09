@@ -6,3 +6,5 @@ from ._costs import PoseCost as PoseCost
 from ._costs import LimitCost as LimitCost
 from ._costs import RestCost as RestCost
 from ._costs import ManipulabilityCost as ManipulabilityCost
+from ._costs import SelfCollisionCost as SelfCollisionCost
+from ._costs import WorldCollisionCost as WorldCollisionCost

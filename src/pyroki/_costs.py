@@ -7,6 +7,14 @@ import jaxls
 from ._robot import Robot
 from ._solver import CostFactor
 
+from .coll._robot_collision import (
+    RobotCollision,
+    compute_self_collision_distance,
+    compute_world_collision_distance,
+)
+from .coll._geometry import CollGeom
+from .coll._collision import colldist_from_sdf
+
 
 class PoseCost(CostFactor[Robot, jaxls.Var[Array], jaxlie.SE3, Array]):
     def cost_fn(
@@ -138,3 +146,49 @@ class ManipulabilityCost(CostFactor[Robot, jaxls.Var[Array], Array]):
         JJT = jacobian @ jacobian.T
         assert JJT.shape == (3, 3)
         return jnp.sqrt(jnp.linalg.det(JJT))
+
+
+class SelfCollisionCost(CostFactor[Robot, RobotCollision, jaxls.Var[Array], float]):
+    def cost_fn(
+        self,
+        vals: jaxls.VarValues,
+        robot: Robot,
+        robot_coll: RobotCollision,
+        joint_var: jaxls.Var[Array],
+        margin: float,
+    ) -> Array:
+        """Cost penalizing self-collisions below a margin using smooth activation.
+
+        Returns a cost vector, one entry for each active collision pair.
+        Cost = colldist_from_sdf(distance, margin).
+        Cost is >= 0.
+        """
+        cfg = vals[joint_var]
+        active_distances = compute_self_collision_distance(robot_coll, robot, cfg)
+        residual = colldist_from_sdf(active_distances, margin)
+        return residual
+
+
+class WorldCollisionCost(
+    CostFactor[Robot, RobotCollision, jaxls.Var[Array], CollGeom, float]
+):
+    def cost_fn(
+        self,
+        vals: jaxls.VarValues,
+        robot: Robot,
+        robot_coll: RobotCollision,
+        joint_var: jaxls.Var[Array],
+        world_geom: CollGeom,
+        margin: float,
+    ) -> Array:
+        """Cost penalizing world collisions below a margin using smooth activation.
+
+        Returns a cost matrix, shape (..., num_links, num_world_objects).
+        Cost = colldist_from_sdf(distance, margin).
+        """
+        cfg = vals[joint_var]
+        dist_matrix = compute_world_collision_distance(
+            robot_coll, robot, cfg, world_geom
+        )
+        residual = colldist_from_sdf(dist_matrix, margin)
+        return residual

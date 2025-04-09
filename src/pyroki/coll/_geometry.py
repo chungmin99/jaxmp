@@ -22,10 +22,6 @@ class CollGeom(abc.ABC):
     pose: jaxlie.SE3
     size: Float[Array, "*batch shape_dim"]
 
-    def __post_init__(self):
-        """Check for compatible batch dimensions."""
-        self.get_batch_axes()  # Will raise ValueError if incompatible
-
     def get_batch_axes(self) -> tuple[int, ...]:
         """Get batch axes of the geometry."""
         batch_axes_from_pose = self.pose.get_batch_axes()
@@ -209,6 +205,27 @@ class Capsule(CollGeom):
         # Store radius and half-length, shape_dim=2
         size = jnp.stack([radius, height / 2.0], axis=-1)
         return Capsule(pose=pose, size=size)
+
+    @staticmethod
+    def from_trimesh(mesh: trimesh.Trimesh) -> Capsule:
+        """
+        Create Capsule geometry from minimum bounding cylinder of the mesh.
+        """
+        if mesh.is_empty:
+            return Capsule(pose=jaxlie.SE3.identity(), size=jnp.zeros((2,)))
+        results = trimesh.bounds.minimum_cylinder(mesh)
+        radius = results["radius"]
+        height = results["height"]
+        tf_mat = results["transform"]
+        tf = jaxlie.SE3.from_matrix(tf_mat)
+        capsule = Capsule.from_center_radius_height(
+            center=jnp.zeros((3,)),
+            orientation_mat=jnp.eye(3),
+            radius=radius,
+            height=height,
+        )
+        capsule = capsule.transform(tf)
+        return capsule
 
     def _create_one_mesh(self, index: tuple) -> trimesh.Trimesh:
         pose_i: jaxlie.SE3 = jax.tree_map(lambda x: x[index], self.pose)
