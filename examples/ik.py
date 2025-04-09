@@ -23,9 +23,10 @@ import tyro
 import viser
 import viser.extras
 from loguru import logger
+import trimesh.creation
 
 import pyroki as pk
-from pyroki.coll import Box, CollGeom, HalfSpace, RobotCollision, Sphere
+from pyroki.coll import CollGeom, HalfSpace, RobotCollision, Sphere
 from pyroki.viewer._batched_urdf import BatchedURDF
 
 
@@ -122,7 +123,7 @@ def solve_ik(
 
 def setup_robot_and_collision(
     robot_description: Optional[str], robot_urdf_path: Optional[Path]
-) -> Tuple[Any, pk.Robot, RobotCollision, HalfSpace, Sphere, Box]:
+) -> Tuple[Any, pk.Robot, RobotCollision, HalfSpace, Sphere]:
     """Loads the robot model and sets up collision objects."""
     logger.info("Loading robot model...")
     urdf, robot = pk.load_robot(
@@ -147,14 +148,8 @@ def setup_robot_and_collision(
     sphere_coll = Sphere.from_center_and_radius(
         jnp.array([0.0, 0.0, 0.0]), jnp.array([0.05])
     )
-    box_coll = Box.from_center_extents_pose(
-        jaxlie.SE3.from_rotation_and_translation(
-            rotation=jaxlie.SO3.identity(), translation=jnp.array([0.4, 0.0, 0.2])
-        ),
-        jnp.array([0.2, 0.2, 0.2]),
-    )
     logger.info("Collision models created.")
-    return urdf, robot, coll, plane_coll, sphere_coll, box_coll
+    return urdf, robot, coll, plane_coll, sphere_coll
 
 
 def setup_visualization_and_gui(
@@ -162,7 +157,6 @@ def setup_visualization_and_gui(
     urdf: Any,
     robot: pk.Robot,
     sphere_coll: Sphere,
-    box_coll: Box,
 ) -> Tuple[BatchedURDF, Dict[str, Any]]:
     """Initializes the Viser visualizer and GUI elements."""
     logger.info("Setting up Viser server and GUI...")
@@ -176,15 +170,22 @@ def setup_visualization_and_gui(
     gui_handles = {}
     gui_handles["timing"] = server.gui.add_number("Time (ms)", 0.01, disabled=True)
     gui_handles["smooth"] = server.gui.add_checkbox("DiffIK", initial_value=False)
-    gui_handles["visualize_coll"] = server.gui.add_checkbox("Show collbody", False)
 
     # Movable sphere obstacle.
     gui_handles["sphere_coll"] = server.scene.add_transform_controls(
         "/sphere", scale=0.2
     )
-    gui_handles["box_coll"] = server.scene.add_transform_controls("/box", scale=0.2)
+    # Set initial position of the sphere control handle
+    initial_sphere_pos_tuple = (0.5, 0.0, 0.3)
+    gui_handles["sphere_coll"].position = initial_sphere_pos_tuple
     server.scene.add_mesh_trimesh("/sphere/mesh", mesh=sphere_coll.to_trimesh())
-    server.scene.add_mesh_trimesh("/box/mesh", mesh=box_coll.to_trimesh())
+
+    # Visualization toggles folder
+    with server.gui.add_folder("Visualization"):
+        gui_handles["visualize_coll"] = server.gui.add_checkbox("Show Collbody", False)
+        gui_handles["show_manipulability"] = server.gui.add_checkbox(
+            "Show Manip Ellipse", False
+        )
 
     # Cost weight sliders.
     with server.gui.add_folder("Cost weights"):
@@ -250,13 +251,15 @@ def run_ik_loop(
     coll: RobotCollision,
     plane_coll: HalfSpace,
     sphere_coll: Sphere,
-    box_coll: Box,
     urdf_vis: BatchedURDF,
     gui_handles: Dict[str, Any],
 ):
     """Runs the main IK solving and visualization loop."""
     logger.info("Starting main IK loop...")
     collbody_mesh_handle: Optional[viser.GlbHandle] = None
+    manip_ellipsoid_handle: Optional[viser.MeshHandle] = None
+    # Create base sphere mesh once before the loop
+    base_manip_sphere = trimesh.creation.icosphere(radius=1.0)
 
     # Initialize joint configuration (midpoint of limits).
     joints = (robot.joint.upper_limits_act + robot.joint.lower_limits_act) / 2
@@ -292,12 +295,7 @@ def run_ik_loop(
             jnp.array(sphere_tf_handle.position),
         )
         sphere_coll_world = sphere_coll.transform(T_sphere_world)
-        T_box_world = jaxlie.SE3.from_rotation_and_translation(
-            jaxlie.SO3(jnp.array(gui_handles["box_coll"].wxyz)),
-            jnp.array(gui_handles["box_coll"].position),
-        )
-        box_coll_world = box_coll.transform(T_box_world)
-        world_coll = [plane_coll, sphere_coll_world, box_coll_world]
+        world_coll = [plane_coll, sphere_coll_world]
 
         # --- Solve IK ---
         start_time = time.time()
@@ -330,6 +328,65 @@ def run_ik_loop(
             current_pose = jaxlie.SE3(Ts_joint_world[target_joint_indices[i]])
             frame_handle.position = onp.array(current_pose.translation().squeeze())
             frame_handle.wxyz = onp.array(current_pose.rotation().wxyz.squeeze())
+
+        # --- Update Manipulability Ellipsoid Visualization ---
+        show_manip = gui_handles["show_manipulability"].value
+        if show_manip and len(target_joint_indices) > 0:
+            try:
+                # Calculate Jacobian for the first target link's translation
+                jacobian = jax.jacfwd(
+                    lambda cfg: jaxlie.SE3(
+                        robot.forward_kinematics(cfg)[target_joint_indices[0]]
+                    ).translation()
+                )(joints)
+
+                # Calculate the Yoshikawa covariance matrix JJ^T
+                cov_matrix = jacobian @ jacobian.T
+                # Ensure it's a 3x3 matrix
+                assert cov_matrix.shape == (
+                    3,
+                    3,
+                ), f"Covariance shape is {cov_matrix.shape}"
+
+                # Eigen decomposition
+                vals, vecs = onp.linalg.eigh(onp.array(cov_matrix))
+
+                # Get position of the first target link
+                target_pose = jaxlie.SE3(Ts_joint_world[target_joint_indices[0]])
+                target_pos = onp.array(target_pose.translation().squeeze())
+
+                # Create and transform sphere primitive into ellipsoid
+                manipulability_ellipsoid_scaling = 0.2
+                ellipsoid_mesh = base_manip_sphere.copy()
+                tf = onp.eye(4)
+                tf[:3, :3] = onp.array(vecs)
+                tf[:3, 3] = target_pos  # Translate
+                ellipsoid_mesh.apply_scale(
+                    onp.sqrt(onp.maximum(vals, 1e-6)) * manipulability_ellipsoid_scaling
+                )
+                ellipsoid_mesh.apply_transform(tf)
+
+                # Add/update mesh in Viser
+                # Use add_mesh_simple for wireframe support
+                manip_ellipsoid_handle = server.scene.add_mesh_simple(
+                    "/manipulability_ellipse",
+                    vertices=onp.array(ellipsoid_mesh.vertices),
+                    faces=onp.array(ellipsoid_mesh.faces),
+                    wireframe=True,
+                    cast_shadow=False,
+                )
+
+            except Exception as e:
+                logger.warning(f"Failed to visualize manipulability: {e}")
+                # Clean up if error occurs during visualization attempt
+                if manip_ellipsoid_handle is not None:
+                    manip_ellipsoid_handle.remove()
+                    manip_ellipsoid_handle = None
+
+        elif not show_manip and manip_ellipsoid_handle is not None:
+            # Remove mesh if visualization is turned off
+            manip_ellipsoid_handle.remove()
+            manip_ellipsoid_handle = None
 
         # Update robot collision body visualization.
         if gui_handles["visualize_coll"].value:
@@ -367,14 +424,14 @@ def main(
     logger.info(f"Using JAX device: {device}")
 
     # --- Robot and Collision Setup ---
-    urdf, robot, coll, plane_coll, sphere_coll, box_coll = setup_robot_and_collision(
+    urdf, robot, coll, plane_coll, sphere_coll = setup_robot_and_collision(
         robot_description, robot_urdf_path
     )
 
     # --- Visualization and GUI Setup ---
     server = viser.ViserServer()
     urdf_vis, gui_handles = setup_visualization_and_gui(
-        server, urdf, robot, sphere_coll, box_coll
+        server, urdf, robot, sphere_coll
     )
 
     # --- Run Main Loop ---
@@ -384,7 +441,6 @@ def main(
         coll,
         plane_coll,
         sphere_coll,
-        box_coll,
         urdf_vis,
         gui_handles,
     )
