@@ -1,8 +1,10 @@
 import jax
 from jax import Array
 import jax.numpy as jnp
+import jax_dataclasses as jdc
 import jaxlie
 import jaxls
+from typing import Tuple
 
 from ._robot import Robot
 from ._solver import CostFactor
@@ -88,15 +90,31 @@ class LimitVelCost(CostFactor[Robot, jaxls.Var[Array], jaxls.Var[Array], float])
         )
 
 
-class RestCost(CostFactor[jaxls.Var[Array]]):
+class RestCost(CostFactor[jaxls.Var[Array], Array]):
+    """Cost factor that penalizes deviation from a specified rest pose."""
+
     def cost_fn(
         self,
         vals: jaxls.VarValues,
         joint_var: jaxls.Var[Array],
+        rest_pose: Array,
     ) -> Array:
-        """Bias towards joints at rest pose."""
-        default = joint_var.default_factory()
-        return vals[joint_var] - default
+        """Bias towards joints at the specified rest pose."""
+        return vals[joint_var] - rest_pose
+
+
+class RestCostWithBase(CostFactor[jaxls.Var[Array], jaxls.Var[jaxlie.SE3], Array]):
+    def cost_fn(
+        self,
+        vals: jaxls.VarValues,
+        joint_var: jaxls.Var[Array],
+        T_world_base_var: jaxls.Var[jaxlie.SE3],
+        rest_pose: Array,
+    ) -> Array:
+        """Bias towards joints at the specified rest pose and identity base pose."""
+        residual_joints = vals[joint_var] - rest_pose
+        residual_base = vals[T_world_base_var].log()
+        return jnp.concatenate([residual_joints, residual_base])
 
 
 class SmoothnessCost(CostFactor[jaxls.Var[Array], jaxls.Var[Array]]):

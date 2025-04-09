@@ -1,18 +1,10 @@
-"""ik.py
-Tests robot inverse kinematics using PyRoKi.
-
-It includes:
-- Loading a robot model (URDF).
-- Defining IK cost functions (pose, joint limits, self-collision, etc.).
-- Setting up world collision objects.
-- Using the Pyroki solver (`pk.solve`).
-- Visualizing the robot, target pose, and collision geometries using Viser.
-- Interactive controls for adjusting cost weights and target pose.
+"""02_ik_with_collision.py
+Basic Inverse Kinematics with Collision Avoidance using PyRoKi.
 """
 
 import time
 from pathlib import Path
-from typing import Literal, Optional, Tuple, Dict, Any
+from typing import Literal, Optional, Tuple, Dict, Any, Sequence
 
 import jax
 import jax.numpy as jnp
@@ -21,9 +13,7 @@ import jaxlie
 import numpy as onp
 import tyro
 import viser
-import viser.extras
 from loguru import logger
-import trimesh.creation
 
 import pyroki as pk
 from pyroki.coll import CollGeom, HalfSpace, RobotCollision, Sphere
@@ -34,7 +24,7 @@ from pyroki.viewer._batched_urdf import BatchedURDF
 def solve_ik(
     robot: pk.Robot,
     coll: RobotCollision,
-    world_coll: list[CollGeom],
+    world_coll: Sequence[CollGeom],
     target_pose: jaxlie.SE3,
     target_joint_indices: jnp.ndarray,
     init_joints: Optional[jnp.ndarray],
@@ -43,12 +33,11 @@ def solve_ik(
     rot_weight: float = 1.0,
     rest_weight: float = 0.01,
     limit_weight: float = 100.0,
-    self_collision_weight: float = 0.1,
-    world_collision_weight: float = 0.1,
-    manipulability_weight: float | None = None,
+    self_collision_weight: float = 2.0,
+    world_collision_weight: float = 5.0,
     max_iterations: int = 1,
 ) -> jax.Array:
-    """Solves the inverse kinematics problem using Pyroki's optimization framework.
+    """Solves the inverse kinematics problem with collision avoidance.
 
     Args:
         robot: The Pyroki Robot model.
@@ -57,12 +46,25 @@ def solve_ik(
         target_pose: The desired SE(3) pose for the target link(s).
         target_joint_indices: Indices of the joints whose links are targets.
         init_joints: Initial guess for the joint configuration. If None, uses the default configuration.
+        pos_weight: Weight for the position component of the pose cost.
+        rot_weight: Weight for the rotation component of the pose cost.
+        rest_weight: Weight for the cost penalizing deviation from the rest pose.
+        limit_weight: Weight for the cost penalizing proximity to joint limits.
+        self_collision_weight: Weight for the self-collision avoidance cost.
+        world_collision_weight: Weight for avoiding collisions with world objects.
+        max_iterations: Maximum number of iterations for the solver.
 
     Returns:
         The optimized joint configuration as a JAX array.
     """
     joint_var = robot.JointVar(0)
     vars = [joint_var]
+
+    # Determine the rest pose: use init_joints if provided, else default
+    if init_joints is not None:
+        rest_pose_for_cost = init_joints
+    else:
+        rest_pose_for_cost = joint_var.default_factory()
 
     factors = [
         pk.PoseCost.make(
@@ -79,8 +81,14 @@ def solve_ik(
         ),
         pk.RestCost.make(
             joint_var,
-            weights=jnp.array([rest_weight]),
+            rest_pose_for_cost, # Use the determined rest pose
+            weights=jnp.array([rest_weight] * robot.joint.actuated_count),
         ),
+    ]
+
+    # Collision avoidance factors.
+    # 1. Self-collision avoidance.
+    factors.append(
         pk.SelfCollisionCost.make(
             robot,
             coll,
@@ -88,8 +96,8 @@ def solve_ik(
             0.02,  # Collision distance threshold
             weights=jnp.array([self_collision_weight]),
         ),
-    ]
-
+    )
+    # 2. World collision avoidance.
     for world_coll_geom in world_coll:
         factors.append(
             pk.WorldCollisionCost.make(
@@ -100,16 +108,6 @@ def solve_ik(
                 0.05,  # Collision distance threshold
                 weights=jnp.array([world_collision_weight]),
             )
-        )
-
-    if manipulability_weight is not None:
-        factors.append(
-            pk.ManipulabilityCost.make(
-                robot,
-                joint_var,
-                target_joint_indices,
-                weights=jnp.array([manipulability_weight]),
-            ),
         )
 
     if init_joints is not None:
@@ -141,13 +139,14 @@ def setup_robot_and_collision(
     # Create robot self-collision model from URDF.
     coll = RobotCollision.from_urdf(urdf)
 
-    # Define world collision geometries.
+    # Define world collision geometries: plane (ground) and sphere (movable obstacle).
     plane_coll = HalfSpace.from_point_and_normal(
         jnp.array([0.0, 0.0, 0.0]), jnp.array([0.0, 0.0, 1.0])
     )
     sphere_coll = Sphere.from_center_and_radius(
         jnp.array([0.0, 0.0, 0.0]), jnp.array([0.05])
     )
+
     logger.info("Collision models created.")
     return urdf, robot, coll, plane_coll, sphere_coll
 
@@ -159,7 +158,6 @@ def setup_visualization_and_gui(
     sphere_coll: Sphere,
 ) -> Tuple[BatchedURDF, Dict[str, Any]]:
     """Initializes the Viser visualizer and GUI elements."""
-    logger.info("Setting up Viser server and GUI...")
     server.scene.configure_default_lights()
 
     # Add robot model and grid.
@@ -175,7 +173,6 @@ def setup_visualization_and_gui(
     gui_handles["sphere_coll"] = server.scene.add_transform_controls(
         "/sphere", scale=0.2
     )
-    # Set initial position of the sphere control handle
     initial_sphere_pos_tuple = (0.5, 0.0, 0.3)
     gui_handles["sphere_coll"].position = initial_sphere_pos_tuple
     server.scene.add_mesh_trimesh("/sphere/mesh", mesh=sphere_coll.to_trimesh())
@@ -183,9 +180,6 @@ def setup_visualization_and_gui(
     # Visualization toggles folder
     with server.gui.add_folder("Visualization"):
         gui_handles["visualize_coll"] = server.gui.add_checkbox("Show Collbody", False)
-        gui_handles["show_manipulability"] = server.gui.add_checkbox(
-            "Show Manip Ellipse", False
-        )
 
     # Cost weight sliders.
     with server.gui.add_folder("Cost weights"):
@@ -198,9 +192,6 @@ def setup_visualization_and_gui(
         gui_handles["limit_weight"] = server.gui.add_slider(
             "Limit", 0.0, 100.0, 0.1, 100.0
         )
-        gui_handles["manipulability_weight"] = server.gui.add_slider(
-            "Manipulability", 0.0, 0.01, 0.001, 0.0
-        )
         gui_handles["rest_weight"] = server.gui.add_slider(
             "Rest", 0.0, 0.1, 0.001, 0.01
         )
@@ -208,7 +199,7 @@ def setup_visualization_and_gui(
             "Self collision", 0.0, 10.0, 0.1, 0.5
         )
         gui_handles["world_collision_weight"] = server.gui.add_slider(
-            "World collision", 0.0, 10.0, 0.1, 0.5
+            "World collision", 0.0, 10.0, 0.1, 1.0
         )
 
     # Button and lists for multiple IK targets.
@@ -241,7 +232,6 @@ def setup_visualization_and_gui(
     gui_handles["add_joint_button"].on_click(lambda _: add_joint_target_gui())
     add_joint_target_gui()  # Add the first target initially.
 
-    logger.info("Viser setup complete.")
     return urdf_vis, gui_handles
 
 
@@ -250,22 +240,17 @@ def run_ik_loop(
     robot: pk.Robot,
     coll: RobotCollision,
     plane_coll: HalfSpace,
-    sphere_coll: Sphere,
+    sphere_coll: Sphere,  # Add sphere_coll back
     urdf_vis: BatchedURDF,
     gui_handles: Dict[str, Any],
 ):
     """Runs the main IK solving and visualization loop."""
-    logger.info("Starting main IK loop...")
     collbody_mesh_handle: Optional[viser.GlbHandle] = None
-    manip_ellipsoid_handle: Optional[viser.MeshHandle] = None
-    # Create base sphere mesh once before the loop
-    base_manip_sphere = trimesh.creation.icosphere(radius=1.0)
 
     # Initialize joint configuration (midpoint of limits).
     joints = (robot.joint.upper_limits_act + robot.joint.lower_limits_act) / 2
 
     while True:
-        # --- Read GUI Inputs ---
         target_joint_indices = jnp.array(
             [robot.joint.names.index(h.value) for h in gui_handles["target_names"]]
         )
@@ -280,24 +265,19 @@ def run_ik_loop(
             init_joints = joints
         else:
             max_iter = 100
-            init_joints = None  # Solver uses default
+            init_joints = None
 
-        manipulability_weight = (
-            gui_handles["manipulability_weight"].value
-            if gui_handles["manipulability_weight"].value > 0
-            else None
-        )
-
-        # Update sphere obstacle pose.
+        # Update sphere obstacle pose based on GUI handle.
         sphere_tf_handle = gui_handles["sphere_coll"]
         T_sphere_world = jaxlie.SE3.from_rotation_and_translation(
             jaxlie.SO3(jnp.array(sphere_tf_handle.wxyz)),
             jnp.array(sphere_tf_handle.position),
         )
         sphere_coll_world = sphere_coll.transform(T_sphere_world)
-        world_coll = [plane_coll, sphere_coll_world]
 
-        # --- Solve IK ---
+        # Combine static plane and dynamic sphere.
+        world_coll: Sequence[CollGeom] = [plane_coll, sphere_coll_world]
+
         start_time = time.time()
         joints = solve_ik(
             robot=robot,
@@ -312,81 +292,19 @@ def run_ik_loop(
             rest_weight=gui_handles["rest_weight"].value,
             self_collision_weight=gui_handles["self_collision_weight"].value,
             world_collision_weight=gui_handles["world_collision_weight"].value,
-            manipulability_weight=manipulability_weight,
             max_iterations=max_iter,
         )
         jax.block_until_ready(joints)
         end_time = time.time()
 
-        # --- Update Visualization ---
         gui_handles["timing"].value = (end_time - start_time) * 1000
         urdf_vis.update_cfg(joints)
 
-        # Update visualization frames for actual target link poses.
         Ts_joint_world = robot.forward_kinematics(joints)
         for i, frame_handle in enumerate(gui_handles["target_frames"]):
             current_pose = jaxlie.SE3(Ts_joint_world[target_joint_indices[i]])
             frame_handle.position = onp.array(current_pose.translation().squeeze())
             frame_handle.wxyz = onp.array(current_pose.rotation().wxyz.squeeze())
-
-        # --- Update Manipulability Ellipsoid Visualization ---
-        show_manip = gui_handles["show_manipulability"].value
-        if show_manip and len(target_joint_indices) > 0:
-            try:
-                # Calculate Jacobian for the first target link's translation
-                jacobian = jax.jacfwd(
-                    lambda cfg: jaxlie.SE3(
-                        robot.forward_kinematics(cfg)[target_joint_indices[0]]
-                    ).translation()
-                )(joints)
-
-                # Calculate the Yoshikawa covariance matrix JJ^T
-                cov_matrix = jacobian @ jacobian.T
-                # Ensure it's a 3x3 matrix
-                assert cov_matrix.shape == (
-                    3,
-                    3,
-                ), f"Covariance shape is {cov_matrix.shape}"
-
-                # Eigen decomposition
-                vals, vecs = onp.linalg.eigh(onp.array(cov_matrix))
-
-                # Get position of the first target link
-                target_pose = jaxlie.SE3(Ts_joint_world[target_joint_indices[0]])
-                target_pos = onp.array(target_pose.translation().squeeze())
-
-                # Create and transform sphere primitive into ellipsoid
-                manipulability_ellipsoid_scaling = 0.2
-                ellipsoid_mesh = base_manip_sphere.copy()
-                tf = onp.eye(4)
-                tf[:3, :3] = onp.array(vecs)
-                tf[:3, 3] = target_pos  # Translate
-                ellipsoid_mesh.apply_scale(
-                    onp.sqrt(onp.maximum(vals, 1e-6)) * manipulability_ellipsoid_scaling
-                )
-                ellipsoid_mesh.apply_transform(tf)
-
-                # Add/update mesh in Viser
-                # Use add_mesh_simple for wireframe support
-                manip_ellipsoid_handle = server.scene.add_mesh_simple(
-                    "/manipulability_ellipse",
-                    vertices=onp.array(ellipsoid_mesh.vertices),
-                    faces=onp.array(ellipsoid_mesh.faces),
-                    wireframe=True,
-                    cast_shadow=False,
-                )
-
-            except Exception as e:
-                logger.warning(f"Failed to visualize manipulability: {e}")
-                # Clean up if error occurs during visualization attempt
-                if manip_ellipsoid_handle is not None:
-                    manip_ellipsoid_handle.remove()
-                    manip_ellipsoid_handle = None
-
-        elif not show_manip and manip_ellipsoid_handle is not None:
-            # Remove mesh if visualization is turned off
-            manip_ellipsoid_handle.remove()
-            manip_ellipsoid_handle = None
 
         # Update robot collision body visualization.
         if gui_handles["visualize_coll"].value:
@@ -418,23 +336,19 @@ def main(
     robot_description: Optional[str] = "panda",
     robot_urdf_path: Optional[Path] = None,
 ):
-    """Main function to run the IK example."""
-    # --- Device Setup ---
+    """Main function to run the basic IK with collision example."""
     jax.config.update("jax_platform_name", device)
     logger.info(f"Using JAX device: {device}")
 
-    # --- Robot and Collision Setup ---
     urdf, robot, coll, plane_coll, sphere_coll = setup_robot_and_collision(
         robot_description, robot_urdf_path
     )
 
-    # --- Visualization and GUI Setup ---
     server = viser.ViserServer()
     urdf_vis, gui_handles = setup_visualization_and_gui(
         server, urdf, robot, sphere_coll
     )
 
-    # --- Run Main Loop ---
     run_ik_loop(
         server,
         robot,

@@ -1,0 +1,1 @@
+from ._batched_urdf import BatchedURDF as BatchedURDF
