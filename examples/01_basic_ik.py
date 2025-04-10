@@ -64,21 +64,23 @@ def solve_ik(
         rest_pose_for_cost = joint_var.default_factory()
 
     factors = [
-        pk.PoseCost.make(
-            robot,
-            joint_var,
-            target_pose,
-            target_joint_indices,
+        pk.PoseCost(
+            (
+                joint_var,
+                target_pose,
+            ),
+            robot=robot,
+            target_joint_indices=target_joint_indices,
             weights=jnp.array([pos_weight] * 3 + [rot_weight] * 3),
         ),
-        pk.LimitCost.make(
-            robot,
-            joint_var,
+        pk.LimitCost(
+            (joint_var,),
+            robot=robot,
             weights=jnp.array([limit_weight] * robot.joint.count),
         ),
-        pk.RestCost.make(
-            joint_var,
-            rest_pose_for_cost,
+        pk.RestCost(
+            (joint_var,),
+            rest_pose=rest_pose_for_cost,
             weights=jnp.array([rest_weight] * robot.joint.actuated_count),
         ),
     ]

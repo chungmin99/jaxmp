@@ -80,21 +80,27 @@ def solve_ik(
         rest_pose_for_cost = joint_var.default_factory()
 
     factors = [
-        pk.PoseCostWithBase.make(
-            robot,
-            joint_var,
-            base_pose_var,  # Pass the variable instance
-            target_pose,
-            target_joint_indices,
+        pk.PoseCostWithBase(
+            (
+                joint_var,
+                base_pose_var,  # Pass the variable instance
+                target_pose,
+            ),
+            robot=robot, 
+            target_joint_indices=target_joint_indices,
             weights=jnp.array([pos_weight] * 3 + [rot_weight] * 3),
         ),
-        pk.LimitCost.make(
-            robot, joint_var, weights=jnp.array([limit_weight] * robot.joint.count)
+        pk.LimitCost(
+            (joint_var,),
+            robot=robot, 
+            weights=jnp.array([limit_weight] * robot.joint.count)
         ),
-        pk.RestCostWithBase.make(
-            joint_var,
-            base_pose_var,
-            rest_pose_for_cost, # Pass the determined rest pose
+        pk.RestCostWithBase(
+            (
+                joint_var,
+                base_pose_var,
+            ),
+            rest_pose=rest_pose_for_cost, # Pass the determined rest pose
             weights=jnp.array(
                 [rest_weight] * robot.joint.actuated_count
                 + [base_constraint_cost_weight] * 6

@@ -4,7 +4,7 @@ Solver for robot kinematic optimization problems, by wrapping `jaxls`.
 
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Literal, Optional, Callable, Hashable
 
 import jax
 import jax_dataclasses as jdc
@@ -30,7 +30,8 @@ def solve(
             init_vars = vars
         else:
             raise ValueError(
-                f"Number of initial variables ({len(init_vars)}) must match number of variables ({len(vars)})."
+                f"Number of initial variables ({len(init_vars)}) must "
+                f"match number of variables ({len(vars)})."
             )
 
     graph = jaxls.FactorGraph.make(factors_jaxls, vars, use_onp=False)
@@ -53,11 +54,13 @@ class CostFactor[*Args]:
     """Cost function."""
 
     cost_inputs: tuple[*Args]
-    weights: Optional[jax.Array | float] = None
+    weights: jax.Array | float
 
     @classmethod
     def make(
-        cls, *cost_inputs: *Args, weights: Optional[jax.Array] = None
+        cls,
+        *cost_inputs: *Args,
+        weights: Optional[jax.Array | float] = None,
     ) -> CostFactor[*Args]:
         """
         Factory method for creating a cost factor using positional arguments.
@@ -68,6 +71,8 @@ class CostFactor[*Args]:
         Example:
             cost = MyCost.make(robot, joint_var, target_pose, weights=jnp.array([1.0]))
         """
+        if weights is None:
+            weights = 1.0
         factor = cls(cost_inputs=cost_inputs, weights=weights)
         return factor
 
@@ -83,17 +88,41 @@ class CostFactor[*Args]:
         assert len(self.cost_inputs) > 0
         assert any(isinstance(arg, jaxls.Var) for arg in self.cost_inputs)
 
-        # Wrapper cost function around `jaxls`, to avoid exposing `jaxls.VarValues`, and the `vals[var]` syntax.
-        def cost_fn(vals: jaxls.VarValues, *args: *Args) -> jax.Array:
-            residual = self.cost_fn(vals, *args)
+        # Add weights to the cost inputs if provided.
+        return jaxls.Factor(
+            self._cost_fn_jaxls,
+            self.cost_inputs,
+            signature_fn=self._signature_fn,
+            name=self.__class__.__name__,
+        )
 
-            if self.weights is not None:
-                residual = residual * self.weights
+    def _cost_fn_jaxls(self, vals: jaxls.VarValues, *args: *Args) -> jax.Array:
+        """
+        Wrapper cost function to apply weights and flatten the residual.
+        """
+        residual = self.cost_fn(vals, *args)
 
-            # Flatten the residual; `jaxls` expects a 1D array.
-            residual = residual.flatten()
+        if self.weights is not None:
+            residual = residual * self.weights
 
-            return residual
+        # Flatten the residual; `jaxls` expects a 1D array.
+        residual = residual.flatten()
 
-        cost_fn.__name__ = f"{self.__class__.__name__}"
-        return jaxls.Factor(cost_fn, self.cost_inputs)
+        return residual
+
+    def _signature_fn(self, _: Callable) -> Hashable:
+        """
+        Retrieve the fields that influence the cost function, including:
+        - the cost function itself,
+        - class properties accessible via `self`.
+
+        Exclude the `cost_inputs` field, as it is passed directly
+        to the cost function as arguments.
+        """
+
+        keys = list(self.__dataclass_fields__.keys())
+        keys.remove("cost_inputs")
+
+        # Determine the field as unique based on its ID / memory address.
+        id_list = [id(getattr(self, key)) for key in keys]
+        return (self.__class__, *id_list)

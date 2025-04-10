@@ -10,5 +10,6 @@ from ._costs import ManipulabilityCost as ManipulabilityCost
 from ._costs import SelfCollisionCost as SelfCollisionCost
 from ._costs import WorldCollisionCost as WorldCollisionCost
 from ._costs import RestCostWithBase as RestCostWithBase
+from ._costs import SmoothnessCost as SmoothnessCost
 
 from . import viewer as viewer

@@ -67,21 +67,26 @@ def solve_ik(
         rest_pose_for_cost = joint_var.default_factory()
 
     factors = [
-        pk.PoseCost.make(
-            robot,
-            joint_var,
-            target_pose,
-            target_joint_indices,
+        # Use direct constructor
+        pk.PoseCost(
+            (
+                joint_var,
+                target_pose,
+            ),
+            robot=robot,
+            target_joint_indices=target_joint_indices,
             weights=jnp.array([pos_weight] * 3 + [rot_weight] * 3),
         ),
-        pk.LimitCost.make(
-            robot,
-            joint_var,
+        # Use direct constructor
+        pk.LimitCost(
+            (joint_var,),
+            robot=robot,
             weights=jnp.array([limit_weight] * robot.joint.count),
         ),
-        pk.RestCost.make(
-            joint_var,
-            rest_pose_for_cost, # Use the determined rest pose
+        # Use direct constructor
+        pk.RestCost(
+            (joint_var,), 
+            rest_pose=rest_pose_for_cost, # Use the determined rest pose
             weights=jnp.array([rest_weight] * robot.joint.actuated_count),
         ),
     ]
@@ -89,23 +94,25 @@ def solve_ik(
     # Collision avoidance factors.
     # 1. Self-collision avoidance.
     factors.append(
-        pk.SelfCollisionCost.make(
-            robot,
-            coll,
-            joint_var,
-            0.02,  # Collision distance threshold
+        # Use direct constructor
+        pk.SelfCollisionCost(
+            (joint_var,),
+            robot=robot,
+            robot_coll=coll,
+            margin=0.02,  # Collision distance threshold
             weights=jnp.array([self_collision_weight]),
         ),
     )
     # 2. World collision avoidance.
     for world_coll_geom in world_coll:
         factors.append(
-            pk.WorldCollisionCost.make(
-                robot,
-                coll,
-                joint_var,
-                world_coll_geom,
-                0.05,  # Collision distance threshold
+            # Use direct constructor
+            pk.WorldCollisionCost(
+                (joint_var,),
+                robot=robot,
+                robot_coll=coll,
+                world_geom=world_coll_geom,
+                margin=0.05,  # Collision distance threshold
                 weights=jnp.array([world_collision_weight]),
             )
         )
