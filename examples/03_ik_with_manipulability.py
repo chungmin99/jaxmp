@@ -28,7 +28,7 @@ from pyroki.viewer import BatchedURDF
 def solve_ik(
     robot: pk.Robot,
     target_pose: jaxlie.SE3,
-    target_joint_indices: jnp.ndarray,
+    target_link_indices: jnp.ndarray,
     init_joints: Optional[jnp.ndarray],
     *,
     pos_weight: float = 5.0,
@@ -43,7 +43,7 @@ def solve_ik(
     Args:
         robot: The Pyroki Robot model.
         target_pose: The desired SE(3) pose for the target link(s).
-        target_joint_indices: Indices of the joints whose links are targets.
+        target_link_indices: Indices of the links to target.
         init_joints: Initial guess for the joint configuration. If None, uses default.
         pos_weight: Weight for the position component of the pose cost.
         rot_weight: Weight for the rotation component of the pose cost.
@@ -71,7 +71,7 @@ def solve_ik(
                 target_pose,
             ),
             robot=robot,
-            target_joint_indices=target_joint_indices,
+            target_link_indices=target_link_indices,
             weights=jnp.array([pos_weight] * 3 + [rot_weight] * 3),
         ),
         pk.LimitCost(
@@ -91,7 +91,7 @@ def solve_ik(
         pk.ManipulabilityCost(
             (joint_var,),
             robot=robot,
-            target_joint_indices=target_joint_indices,
+            target_link_indices=target_link_indices,
             weights=jnp.array([manipulability_weight]),
         ),
     )
@@ -169,13 +169,14 @@ def setup_visualization_and_gui(
     gui_handles["target_names"] = []
     gui_handles["target_tfs"] = []
     gui_handles["target_frames"] = []
+    gui_handles["target_link_name_dropdowns"] = []
 
-    def add_joint_target_gui():
-        idx = len(gui_handles["target_names"])
+    def add_target_link_gui():
+        idx = len(gui_handles["target_link_name_dropdowns"])
         name_handle = server.gui.add_dropdown(
-            f"target joint {idx}",
-            list(robot.joint.names),
-            initial_value=robot.joint.names[0],
+            f"target link {idx}",
+            list(robot.link.names),
+            initial_value=robot.link.names[-1],
         )
         tf_handle = server.scene.add_transform_controls(
             f"target_transform_{idx}", scale=0.2
@@ -186,12 +187,12 @@ def setup_visualization_and_gui(
             axes_radius=0.05 * 0.2,
             origin_radius=0.1 * 0.2,
         )
-        gui_handles["target_names"].append(name_handle)
+        gui_handles["target_link_name_dropdowns"].append(name_handle)
         gui_handles["target_tfs"].append(tf_handle)
         gui_handles["target_frames"].append(frame_handle)
 
-    gui_handles["add_joint_button"].on_click(lambda _: add_joint_target_gui())
-    add_joint_target_gui()
+    gui_handles["add_joint_button"].on_click(lambda _: add_target_link_gui())
+    add_target_link_gui()
 
     return urdf_vis, gui_handles
 
@@ -210,8 +211,8 @@ def run_ik_loop(
     joints = (robot.joint.upper_limits_act + robot.joint.lower_limits_act) / 2
 
     while True:
-        target_joint_indices = jnp.array(
-            [robot.joint.names.index(h.value) for h in gui_handles["target_names"]]
+        target_link_indices = jnp.array(
+            [robot.link.names.index(h.value) for h in gui_handles["target_link_name_dropdowns"]]
         )
         target_poses = jaxlie.SE3(
             jnp.stack(
@@ -230,7 +231,7 @@ def run_ik_loop(
         joints = solve_ik(
             robot=robot,
             target_pose=target_poses,
-            target_joint_indices=target_joint_indices,
+            target_link_indices=target_link_indices,
             init_joints=init_joints,
             pos_weight=gui_handles["pos_weight"].value,
             rot_weight=gui_handles["rot_weight"].value,
@@ -245,26 +246,39 @@ def run_ik_loop(
         gui_handles["timing"].value = (end_time - start_time) * 1000
         urdf_vis.update_cfg(joints)
 
-        Ts_joint_world = robot.forward_kinematics(joints)
+        # Visualize current pose of target links
+        Ts_link_world_array = robot.forward_kinematics(joints) # FK now returns link poses array
         for i, frame_handle in enumerate(gui_handles["target_frames"]):
-            current_pose = jaxlie.SE3(Ts_joint_world[target_joint_indices[i]])
+            # Index the numerical array to get the specific link's world pose array
+            current_pose_array = Ts_link_world_array[target_link_indices[i]]
+            # Convert back to SE3 object to access methods
+            current_pose = jaxlie.SE3(current_pose_array)
             frame_handle.position = onp.array(current_pose.translation().squeeze())
             frame_handle.wxyz = onp.array(current_pose.rotation().wxyz.squeeze())
 
-        # --- Update Manipulability Ellipsoid Visualization ---
+        # --- Original Logic for Manipulability Ellipsoid Visualization --- 
         show_manip = gui_handles["show_manipulability"].value
-        if show_manip and len(target_joint_indices) > 0:
+        if show_manip and len(target_link_indices) > 0:
             try:
+                # Calculate Jacobian for the first target link's translation
+                first_target_link_idx = target_link_indices[0]
                 jacobian = jax.jacfwd(
-                    lambda cfg: jaxlie.SE3(
-                        robot.forward_kinematics(cfg)[target_joint_indices[0]]
-                    ).translation()
+                    # Function gets pose array, extracts translation for the target link
+                    lambda q: robot.forward_kinematics(q)[first_target_link_idx, 4:] 
                 )(joints)
+                # jacobian shape: (3, num_actuated_joints)
+
                 cov_matrix = jacobian @ jacobian.T
                 assert cov_matrix.shape == (3, 3)
+
+                # Use numpy for SVD/Eigh as it might be more stable for visualization
                 vals, vecs = onp.linalg.eigh(onp.array(cov_matrix))
-                target_pose = jaxlie.SE3(Ts_joint_world[target_joint_indices[0]])
+
+                # Get current world pose of the first target link
+                first_target_pose_array = Ts_link_world_array[first_target_link_idx]
+                target_pose = jaxlie.SE3(first_target_pose_array)
                 target_pos = onp.array(target_pose.translation().squeeze())
+
                 manipulability_ellipsoid_scaling = 0.2
                 ellipsoid_mesh = base_manip_sphere.copy()
                 tf = onp.eye(4)
@@ -274,6 +288,12 @@ def run_ik_loop(
                     onp.sqrt(onp.maximum(vals, 1e-6)) * manipulability_ellipsoid_scaling
                 )
                 ellipsoid_mesh.apply_transform(tf)
+
+                # Use add_mesh_simple (or similar from original code) for visualization
+                # Ensure correct handle management
+                if manip_ellipsoid_handle is not None:
+                    manip_ellipsoid_handle.remove() # Remove previous if exists
+                
                 manip_ellipsoid_handle = server.scene.add_mesh_simple(
                     "/manipulability_ellipse",
                     vertices=onp.array(ellipsoid_mesh.vertices),
@@ -281,6 +301,7 @@ def run_ik_loop(
                     wireframe=True,
                     cast_shadow=False,
                 )
+
             except Exception as e:
                 logger.warning(f"Failed to visualize manipulability: {e}")
                 if manip_ellipsoid_handle is not None:
@@ -289,6 +310,7 @@ def run_ik_loop(
         elif not show_manip and manip_ellipsoid_handle is not None:
             manip_ellipsoid_handle.remove()
             manip_ellipsoid_handle = None
+        # --- End Original Logic --- 
 
 
 def main(

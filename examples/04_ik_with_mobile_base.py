@@ -25,7 +25,7 @@ from pyroki.viewer import BatchedURDF
 def solve_ik(
     robot: pk.Robot,
     target_pose: jaxlie.SE3,
-    target_joint_indices: jnp.ndarray,
+    target_link_indices: jnp.ndarray,
     base_constraint_flags: jnp.ndarray,
     init_joints: Optional[jnp.ndarray],
     init_base_pose: Optional[jaxlie.SE3],
@@ -42,7 +42,7 @@ def solve_ik(
     Args:
         robot: The Pyroki Robot model.
         target_pose: Desired SE(3) pose for target link(s) in world frame.
-        target_joint_indices: Indices of the joints whose links are targets.
+        target_link_indices: Indices of the links to target.
         base_constraint_flags: Flags (shape 6) penalizing base pose deviation.
         init_joints: Initial guess for joint configuration.
         init_base_pose: Initial guess for base pose.
@@ -86,8 +86,8 @@ def solve_ik(
                 base_pose_var,  # Pass the variable instance
                 target_pose,
             ),
-            robot=robot, 
-            target_joint_indices=target_joint_indices,
+            robot=robot,
+            target_link_indices=target_link_indices,
             weights=jnp.array([pos_weight] * 3 + [rot_weight] * 3),
         ),
         pk.LimitCost(
@@ -189,13 +189,14 @@ def setup_visualization_and_gui(
     gui_handles["target_names"] = []
     gui_handles["target_tfs"] = []
     gui_handles["target_frames"] = []
+    gui_handles["target_link_name_dropdowns"] = []
 
-    def add_joint_target_gui():
-        idx = len(gui_handles["target_names"])
+    def add_target_link_gui():
+        idx = len(gui_handles["target_link_name_dropdowns"])
         name_handle = server.gui.add_dropdown(
-            f"target joint {idx}",
-            list(robot.joint.names),
-            initial_value=robot.joint.names[0],
+            f"target link {idx}",
+            list(robot.link.names),
+            initial_value=robot.link.names[-1],
         )
         tf_handle = server.scene.add_transform_controls(
             f"target_transform_{idx}", scale=0.2
@@ -206,12 +207,12 @@ def setup_visualization_and_gui(
             axes_radius=0.05 * 0.2,
             origin_radius=0.1 * 0.2,
         )
-        gui_handles["target_names"].append(name_handle)
+        gui_handles["target_link_name_dropdowns"].append(name_handle)
         gui_handles["target_tfs"].append(tf_handle)
         gui_handles["target_frames"].append(frame_handle)
 
-    gui_handles["add_joint_button"].on_click(lambda _: add_joint_target_gui())
-    add_joint_target_gui()
+    gui_handles["add_joint_button"].on_click(lambda _: add_target_link_gui())
+    add_target_link_gui()
 
     return urdf_vis, gui_handles
 
@@ -227,8 +228,8 @@ def run_ik_loop(
     joints = (robot.joint.upper_limits_act + robot.joint.lower_limits_act) / 2
 
     while True:
-        target_joint_indices = jnp.array(
-            [robot.joint.names.index(h.value) for h in gui_handles["target_names"]]
+        target_link_indices = jnp.array(
+            [robot.link.names.index(h.value) for h in gui_handles["target_link_name_dropdowns"]]
         )
         target_poses = jaxlie.SE3(
             jnp.stack(
@@ -260,7 +261,7 @@ def run_ik_loop(
         base_pose, joints = solve_ik(
             robot=robot,
             target_pose=target_poses,
-            target_joint_indices=target_joint_indices,
+            target_link_indices=target_link_indices,
             base_constraint_flags=base_constraint_flags,
             init_joints=init_joints,
             init_base_pose=init_base_pose,
@@ -278,20 +279,25 @@ def run_ik_loop(
 
         gui_handles["timing"].value = (end_time - start_time) * 1000
 
+        # Update base pose visualization
         base_frame_handle = gui_handles["base_frame"]
         base_frame_handle.position = onp.array(base_pose.translation())
         base_frame_handle.wxyz = onp.array(base_pose.rotation().wxyz)
 
+        # urdf_vis.update_base_pose(base_pose) # Original code might not have had this either
         urdf_vis.update_cfg(joints)
 
+        # --- Original Logic for visualizing target frames --- 
         # Get world poses of target frames for visualization
-        T_joints_base = robot.forward_kinematics(joints)
-        T_joints_world = base_pose @ jaxlie.SE3(T_joints_base)
+        Ts_link_base_array = robot.forward_kinematics(joints) # Get link poses relative to base
+        Ts_world_link_object = base_pose @ jaxlie.SE3(Ts_link_base_array) # Transform to world as SE3 object
+
         for i, frame_handle in enumerate(gui_handles["target_frames"]):
-            # Index into underlying array and reconstruct SE3
-            current_pose = jaxlie.SE3(T_joints_world.wxyz_xyz[target_joint_indices[i]])
+            # Index into the numerical array of the SE3 object
+            current_pose = jaxlie.SE3(Ts_world_link_object.wxyz_xyz[target_link_indices[i]])
             frame_handle.position = onp.array(current_pose.translation().squeeze())
             frame_handle.wxyz = onp.array(current_pose.rotation().wxyz.squeeze())
+        # --- End Original Logic --- 
 
 
 def main(

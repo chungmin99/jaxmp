@@ -23,7 +23,7 @@ import pyroki.viewer as viewer
 def solve_trajopt(
     robot: pk.Robot,
     target_pose: jaxlie.SE3,
-    target_joint_indices: jax.Array,
+    target_link_indices: jax.Array,
     pos_weight: float,
     rot_weight: float,
     rest_weight: float,
@@ -49,7 +49,7 @@ def solve_trajopt(
                 jaxlie.SE3(target_poses_T_N_7_params),
             ),
             weights=ik_weights,
-            target_joint_indices=target_joint_indices,
+            target_link_indices=target_link_indices,
             robot=robot,
         ),
         pk.LimitCost(
@@ -103,8 +103,8 @@ def main(
     rest_pose = (robot.joint.upper_limits_act + robot.joint.lower_limits_act) / 2
 
     # Solve trajectory optimization.
-    target_joint_indices = jnp.array(
-        [robot.joint.names.index(k) for k in trajectory.keys()]
+    target_link_indices = jnp.array(
+        [robot.link.names.index(k) for k in trajectory.keys()]
     )
     target_pose = jaxlie.SE3(jnp.stack([v for v in trajectory.values()]))
     traj_handle = server.scene.add_transform_controls("traj_handle", scale=0.2)
@@ -143,7 +143,7 @@ def main(
         traj = solve_trajopt(
             robot,
             target_pose_final,
-            target_joint_indices,
+            target_link_indices,
             pos_weight=pos_weight,
             rot_weight=rot_weight,
             rest_weight=rest_weight,
@@ -170,12 +170,12 @@ def main(
         assert traj is not None
         robot_viz.update_cfg(traj[slider.value])
 
-        Ts_world_joint = onp.array(robot.forward_kinematics(traj[slider.value]))
-        for idx, joint_name in zip(target_joint_indices, trajectory.keys()):
+        Ts_world_link = onp.array(robot.forward_kinematics(traj[slider.value]))
+        for idx, joint_name in zip(target_link_indices, trajectory.keys()):
             server.scene.add_frame(
                 f"/joints/{joint_name}",
-                wxyz=Ts_world_joint[idx, :4],
-                position=Ts_world_joint[idx, 4:7],
+                wxyz=Ts_world_link[idx, :4],
+                position=Ts_world_link[idx, 4:7],
                 axes_length=0.1,
                 axes_radius=0.01,
             )

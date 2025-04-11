@@ -26,7 +26,7 @@ def solve_ik(
     coll: RobotCollision,
     world_coll: Sequence[CollGeom],
     target_pose: jaxlie.SE3,
-    target_joint_indices: jnp.ndarray,
+    target_link_indices: jnp.ndarray,
     init_joints: Optional[jnp.ndarray],
     *,
     pos_weight: float = 5.0,
@@ -44,7 +44,7 @@ def solve_ik(
         coll: The RobotCollision model for self-collision checking.
         world_coll: A list of collision geometries representing the environment.
         target_pose: The desired SE(3) pose for the target link(s).
-        target_joint_indices: Indices of the joints whose links are targets.
+        target_link_indices: Indices of the links to target.
         init_joints: Initial guess for the joint configuration. If None, uses the default configuration.
         pos_weight: Weight for the position component of the pose cost.
         rot_weight: Weight for the rotation component of the pose cost.
@@ -74,7 +74,7 @@ def solve_ik(
                 target_pose,
             ),
             robot=robot,
-            target_joint_indices=target_joint_indices,
+            target_link_indices=target_link_indices,
             weights=jnp.array([pos_weight] * 3 + [rot_weight] * 3),
         ),
         # Use direct constructor
@@ -214,14 +214,15 @@ def setup_visualization_and_gui(
     gui_handles["target_names"] = []
     gui_handles["target_tfs"] = []
     gui_handles["target_frames"] = []
+    gui_handles["target_link_name_dropdowns"] = []
 
-    def add_joint_target_gui():
+    def add_target_link_gui():
         """Adds GUI elements for a new IK target."""
-        idx = len(gui_handles["target_names"])
+        idx = len(gui_handles["target_link_name_dropdowns"])
         name_handle = server.gui.add_dropdown(
-            f"target joint {idx}",
-            list(robot.joint.names),
-            initial_value=robot.joint.names[0],
+            f"target link {idx}",
+            list(robot.link.names),
+            initial_value=robot.link.names[-1],
         )
         tf_handle = server.scene.add_transform_controls(
             f"target_transform_{idx}", scale=0.2
@@ -236,8 +237,8 @@ def setup_visualization_and_gui(
         gui_handles["target_tfs"].append(tf_handle)
         gui_handles["target_frames"].append(frame_handle)
 
-    gui_handles["add_joint_button"].on_click(lambda _: add_joint_target_gui())
-    add_joint_target_gui()  # Add the first target initially.
+    gui_handles["add_joint_button"].on_click(lambda _: add_target_link_gui())
+    add_target_link_gui()  # Add the first target initially.
 
     return urdf_vis, gui_handles
 
@@ -251,15 +252,14 @@ def run_ik_loop(
     urdf_vis: BatchedURDF,
     gui_handles: Dict[str, Any],
 ):
-    """Runs the main IK solving and visualization loop."""
-    collbody_mesh_handle: Optional[viser.GlbHandle] = None
-
-    # Initialize joint configuration (midpoint of limits).
+    """Runs the IK solving and visualization loop."""
     joints = (robot.joint.upper_limits_act + robot.joint.lower_limits_act) / 2
 
     while True:
-        target_joint_indices = jnp.array(
-            [robot.joint.names.index(h.value) for h in gui_handles["target_names"]]
+        # Get target link indices and poses from GUI.
+        target_link_indices = jnp.array(
+            [robot.link.names.index(h.value) for h in gui_handles["target_names"]],
+            dtype=jnp.int32,  # Ensure integer type for indexing
         )
         target_poses = jaxlie.SE3(
             jnp.stack(
@@ -267,6 +267,7 @@ def run_ik_loop(
             )
         )
 
+        # Determine solver settings (smooth vs full optimization).
         if gui_handles["smooth"].value:
             max_iter = 1
             init_joints = joints
@@ -285,13 +286,14 @@ def run_ik_loop(
         # Combine static plane and dynamic sphere.
         world_coll: Sequence[CollGeom] = [plane_coll, sphere_coll_world]
 
+        # Solve IK.
         start_time = time.time()
         joints = solve_ik(
             robot=robot,
             coll=coll,
-            world_coll=world_coll,
+            world_coll=world_coll, # Use updated world_coll
             target_pose=target_poses,
-            target_joint_indices=target_joint_indices,
+            target_link_indices=target_link_indices, # Pass link indices
             init_joints=init_joints,
             pos_weight=gui_handles["pos_weight"].value,
             rot_weight=gui_handles["rot_weight"].value,
@@ -304,38 +306,18 @@ def run_ik_loop(
         jax.block_until_ready(joints)
         end_time = time.time()
 
+        # Update GUI and visualization.
         gui_handles["timing"].value = (end_time - start_time) * 1000
         urdf_vis.update_cfg(joints)
 
-        Ts_joint_world = robot.forward_kinematics(joints)
+        Ts_link_world_array = robot.forward_kinematics(joints)
         for i, frame_handle in enumerate(gui_handles["target_frames"]):
-            current_pose = jaxlie.SE3(Ts_joint_world[target_joint_indices[i]])
+            # Index the numerical array to get the specific link's world pose array
+            current_pose_array = Ts_link_world_array[target_link_indices[i]]
+            # Convert back to SE3 object to access methods
+            current_pose = jaxlie.SE3(current_pose_array)
             frame_handle.position = onp.array(current_pose.translation().squeeze())
             frame_handle.wxyz = onp.array(current_pose.rotation().wxyz.squeeze())
-
-        # Update robot collision body visualization.
-        if gui_handles["visualize_coll"].value:
-            try:
-                coll_world: CollGeom = coll.at_config(robot, joints)
-                coll_mesh = coll_world.to_trimesh()
-
-                if coll_mesh is not None and not coll_mesh.is_empty:
-                    # Using name ensures update instead of adding new mesh.
-                    collbody_mesh_handle = server.scene.add_mesh_trimesh(
-                        "/robot_collision_bodies",
-                        mesh=coll_mesh,
-                    )
-                elif collbody_mesh_handle is not None:
-                    collbody_mesh_handle.remove()
-                    collbody_mesh_handle = None
-            except Exception as e:
-                logger.warning(f"Failed to visualize collision mesh: {e}")
-                if collbody_mesh_handle is not None:
-                    collbody_mesh_handle.remove()
-                    collbody_mesh_handle = None
-        elif collbody_mesh_handle is not None:
-            collbody_mesh_handle.remove()
-            collbody_mesh_handle = None
 
 
 def main(

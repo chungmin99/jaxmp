@@ -29,7 +29,7 @@ from pyroki.viewer import BatchedURDF
 def solve_ik(
     robot: pk.Robot,
     target_pose: jaxlie.SE3,
-    target_joint_indices: jnp.ndarray,
+    target_link_indices: jnp.ndarray,
     init_joints: Optional[jnp.ndarray],
     *,
     pos_weight: float = 5.0,
@@ -43,7 +43,7 @@ def solve_ik(
     Args:
         robot: The Pyroki Robot model.
         target_pose: The desired SE(3) pose for the target link(s).
-        target_joint_indices: Indices of the joints whose links are targets.
+        target_link_indices: Indices of the links to target.
         init_joints: Initial guess for the joint configuration. If None, uses default.
         pos_weight: Weight for the position component of the pose cost.
         rot_weight: Weight for the rotation component of the pose cost.
@@ -70,7 +70,7 @@ def solve_ik(
                 target_pose,
             ),
             robot=robot,
-            target_joint_indices=target_joint_indices,
+            target_link_indices=target_link_indices,
             weights=jnp.array([pos_weight] * 3 + [rot_weight] * 3),
         ),
         pk.LimitCost(
@@ -149,13 +149,14 @@ def setup_visualization_and_gui(
     gui_handles["target_names"] = []
     gui_handles["target_tfs"] = []
     gui_handles["target_frames"] = []
+    gui_handles["target_link_name_dropdowns"] = []
 
-    def add_joint_target_gui():
-        idx = len(gui_handles["target_names"])
+    def add_target_link_gui():
+        idx = len(gui_handles["target_link_name_dropdowns"])
         name_handle = server.gui.add_dropdown(
-            f"target joint {idx}",
-            list(robot.joint.names),
-            initial_value=robot.joint.names[0],
+            f"target link {idx}",
+            list(robot.link.names),
+            initial_value=robot.link.names[-1],
         )
         tf_handle = server.scene.add_transform_controls(
             f"target_transform_{idx}", scale=0.2
@@ -166,12 +167,12 @@ def setup_visualization_and_gui(
             axes_radius=0.05 * 0.2,
             origin_radius=0.1 * 0.2,
         )
-        gui_handles["target_names"].append(name_handle)
+        gui_handles["target_link_name_dropdowns"].append(name_handle)
         gui_handles["target_tfs"].append(tf_handle)
         gui_handles["target_frames"].append(frame_handle)
 
-    gui_handles["add_joint_button"].on_click(lambda _: add_joint_target_gui())
-    add_joint_target_gui()
+    gui_handles["add_joint_button"].on_click(lambda _: add_target_link_gui())
+    add_target_link_gui()
 
     return urdf_vis, gui_handles
 
@@ -186,8 +187,8 @@ def run_ik_loop(
     joints = (robot.joint.upper_limits_act + robot.joint.lower_limits_act) / 2
 
     while True:
-        target_joint_indices = jnp.array(
-            [robot.joint.names.index(h.value) for h in gui_handles["target_names"]]
+        target_link_indices = jnp.array(
+            [robot.link.names.index(h.value) for h in gui_handles["target_link_name_dropdowns"]]
         )
         target_poses = jaxlie.SE3(
             jnp.stack(
@@ -206,7 +207,7 @@ def run_ik_loop(
         joints = solve_ik(
             robot=robot,
             target_pose=target_poses,
-            target_joint_indices=target_joint_indices,
+            target_link_indices=target_link_indices,
             init_joints=init_joints,
             pos_weight=gui_handles["pos_weight"].value,
             rot_weight=gui_handles["rot_weight"].value,
@@ -220,9 +221,9 @@ def run_ik_loop(
         gui_handles["timing"].value = (end_time - start_time) * 1000
         urdf_vis.update_cfg(joints)
 
-        Ts_joint_world = robot.forward_kinematics(joints)
+        Ts_link_world = robot.forward_kinematics(joints)
         for i, frame_handle in enumerate(gui_handles["target_frames"]):
-            current_pose = jaxlie.SE3(Ts_joint_world[target_joint_indices[i]])
+            current_pose = jaxlie.SE3(Ts_link_world[target_link_indices[i]])
             frame_handle.position = onp.array(current_pose.translation().squeeze())
             frame_handle.wxyz = onp.array(current_pose.rotation().wxyz.squeeze())
 
