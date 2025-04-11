@@ -3,7 +3,7 @@ from __future__ import annotations
 import jax.numpy as jnp
 from jaxtyping import Float, Array
 
-from ._geometry import HalfSpace, Sphere, Capsule, Box
+from ._geometry import HalfSpace, Sphere, Capsule, Box, Heightmap
 from . import _utils
 
 
@@ -187,3 +187,166 @@ def capsule_box(capsule: Capsule, box: Box) -> Float[Array, "*batch"]:
     dist_axis_to_box = jnp.linalg.norm(closest_point_on_box_world - pt_on_axis, axis=-1)
     dist = dist_axis_to_box - cap_radius
     return dist
+
+
+# --- Heightmap Collision Implementations ---
+
+
+def heightmap_sphere(heightmap: Heightmap, sphere: Sphere) -> Float[Array, "*batch"]:
+    """Calculate approximate distance between heightmap and sphere.
+
+    Approximation: Considers the heightmap point directly below the sphere center
+    using bilinear interpolation and calculates vertical distance minus radius.
+    """
+    batch_axes = jnp.broadcast_shapes(
+        heightmap.get_batch_axes(), sphere.get_batch_axes()
+    )
+
+    sphere_pos_w = sphere.pose.translation()
+    sphere_radius = sphere.radius
+    interpolated_local_z = heightmap._interpolate_height_at_coords(sphere_pos_w)
+    sphere_pos_h = heightmap.pose.inverse().apply(sphere_pos_w)
+    sphere_local_z = sphere_pos_h[..., 2]
+    dist = sphere_local_z - interpolated_local_z - sphere_radius
+
+    assert dist.shape == batch_axes
+    return dist
+
+
+def heightmap_capsule(heightmap: Heightmap, capsule: Capsule) -> Float[Array, "*batch"]:
+    """Calculate approximate distance between heightmap and capsule.
+
+    Approximation: Considers the heightmap point directly below each of the
+    capsule's two end-sphere centers. Calculates the vertical distance for each
+    (minus capsule radius) and returns the minimum.
+    Uses the Heightmap._interpolate_height_at_coords helper.
+
+    Limitation: Does not accurately capture collisions involving the cylindrical
+    body of the capsule if both endpoints are above the heightmap.
+    """
+    batch_axes = jnp.broadcast_shapes(
+        heightmap.get_batch_axes(), capsule.get_batch_axes()
+    )
+
+    cap_pos_w = capsule.pose.translation()
+    cap_radius = capsule.radius
+    cap_axis_w = capsule.axis  # World frame axis
+    segment_offset_w = cap_axis_w * capsule.length[..., None]
+
+    # Calculate world positions of the two end-sphere centers.
+    p1_w = cap_pos_w + segment_offset_w
+    p2_w = cap_pos_w - segment_offset_w
+
+    # Interpolate heightmap surface height (local Z) below each end-sphere center.
+    h_surf1_local = heightmap._interpolate_height_at_coords(p1_w)
+    h_surf2_local = heightmap._interpolate_height_at_coords(p2_w)
+
+    # Get end-sphere centers Z coordinates in heightmap's local frame.
+    p1_h = heightmap.pose.inverse().apply(p1_w)
+    p2_h = heightmap.pose.inverse().apply(p2_w)
+    z1_local = p1_h[..., 2]
+    z2_local = p2_h[..., 2]
+
+    # Calculate vertical distance for each end sphere.
+    dist1 = z1_local - h_surf1_local - cap_radius
+    dist2 = z2_local - h_surf2_local - cap_radius
+
+    # Return the minimum distance.
+    min_dist = jnp.minimum(dist1, dist2)
+    assert min_dist.shape == batch_axes
+    return min_dist
+
+
+def heightmap_halfspace(
+    heightmap: Heightmap, halfspace: HalfSpace
+) -> Float[Array, "*batch"]:
+    """Calculate approximate distance between heightmap and halfspace.
+
+    Approximation: Finds the minimum signed distance between any heightmap vertex
+    and the halfspace plane.
+    """
+    batch_axes = jnp.broadcast_shapes(
+        heightmap.get_batch_axes(), halfspace.get_batch_axes()
+    )
+
+    # Heightmap vertices in world frame.
+    verts_local = heightmap._get_vertices_local()  # (*batch, N, 3), N=H*W
+    verts_world = heightmap.pose.apply(verts_local)  # (*batch, N, 3)
+
+    # Halfspace plane properties (world frame).
+    hs_normal_w = halfspace.normal  # (*batch, 3)
+    hs_point_w = halfspace.pose.translation()  # (*batch, 3)
+
+    # Ensure batch dimensions are compatible for broadcasting.
+    batch_axes = jnp.broadcast_shapes(
+        heightmap.get_batch_axes(), halfspace.get_batch_axes()
+    )
+    # Expand dims for broadcasting against vertices.
+    hs_normal_w = jnp.broadcast_to(hs_normal_w, batch_axes + (3,))[..., None, :]
+    hs_point_w = jnp.broadcast_to(hs_point_w, batch_axes + (3,))[..., None, :]
+    verts_world = jnp.broadcast_to(verts_world, batch_axes + verts_world.shape[-2:])
+
+    # Calculate signed distance for each vertex to the plane:
+    # dist = dot(vertex - plane_point, plane_normal)
+    vertex_distances = jnp.einsum(
+        "...vi,...i->...v", verts_world - hs_point_w, hs_normal_w.squeeze(-2)
+    )
+
+    # Find the minimum distance among all vertices.
+    min_dist = jnp.min(vertex_distances, axis=-1)
+    assert min_dist.shape == batch_axes
+    return min_dist
+
+
+def heightmap_box(heightmap: Heightmap, box: Box) -> Float[Array, "*batch"]:
+    """Calculate approximate distance between heightmap and box.
+
+    Approximation: Finds the minimum vertical distance between the heightmap
+    surface (interpolated) and each of the box's 8 corner vertices.
+    Uses the Heightmap._interpolate_height_at_coords helper.
+
+    Limitation: Very coarse approximation, ignores box faces and edges.
+    """
+    batch_axes = jnp.broadcast_shapes(heightmap.get_batch_axes(), box.get_batch_axes())
+
+    # Box properties.
+    box_pose = box.pose
+    box_extents = box.extents
+    box_half_extents = box_extents / 2.0
+
+    # 1. Calculate Box corners.
+    local_corners = (
+        jnp.array(
+            [
+                [-1, -1, -1],
+                [-1, -1, +1],
+                [-1, +1, -1],
+                [-1, +1, +1],
+                [+1, -1, -1],
+                [+1, -1, +1],
+                [+1, +1, -1],
+                [+1, +1, +1],
+            ]
+        )
+        * box_half_extents[..., None, :]
+    )
+    world_corners = box_pose.apply(local_corners)
+    assert world_corners.shape == (*batch_axes, 8, 3)
+
+    # 2. Interpolate heightmap height below each corner
+    h_surf_local_corners = heightmap._interpolate_height_at_coords(world_corners)
+    assert h_surf_local_corners.shape == (*batch_axes, 8)
+
+    # 3. Get corner Z coordinates in heightmap local frame
+    corners_h = heightmap.pose.inverse().apply(world_corners)
+    corners_local_z = corners_h[..., 2]
+    assert corners_local_z.shape == (*batch_axes, 8)
+
+    # 4. Calculate vertical distances for each corner.
+    dists_corners = corners_local_z - h_surf_local_corners
+    assert dists_corners.shape == (*batch_axes, 8)
+
+    # 5. Return minimum distance.
+    min_dist = jnp.min(dists_corners, axis=-1)
+    assert min_dist.shape == batch_axes
+    return min_dist

@@ -11,6 +11,7 @@ from jaxtyping import Float, Array
 import jax_dataclasses as jdc
 import numpy as onp
 import jax
+import jax.scipy.ndimage
 
 from ._utils import make_frame
 
@@ -287,3 +288,225 @@ class Box(CollGeom):
         tf[:3, 3] = pos
         box_mesh.apply_transform(tf)
         return box_mesh
+
+
+@jdc.pytree_dataclass
+class Heightmap(CollGeom):
+    """Heightmap geometry defined by a grid of height values.
+    The heightmap is oriented such that its base lies on the XY plane of its local frame.
+
+    size[*batch, 0] = x_scale (grid spacing along local x)
+    size[*batch, 1] = y_scale (grid spacing along local y)
+    size[*batch, 2] = height_scale (multiplier for height data)
+    """
+
+    height_data: Float[Array, "*batch H W"]
+
+    @property
+    def x_scale(self) -> Float[Array, "*batch"]:
+        """Grid spacing along the local X-axis."""
+        return self.size[..., 0]
+
+    @property
+    def y_scale(self) -> Float[Array, "*batch"]:
+        """Grid spacing along the local Y-axis."""
+        return self.size[..., 1]
+
+    @property
+    def height_scale(self) -> Float[Array, "*batch"]:
+        """Multiplier applied to height data values."""
+        return self.size[..., 2]
+
+    @property
+    def rows(self) -> int:
+        """Number of rows in the height grid (along local Y)."""
+        return self.height_data.shape[-2]
+
+    @property
+    def cols(self) -> int:
+        """Number of columns in the height grid (along local X)."""
+        return self.height_data.shape[-1]
+
+    def _interpolate_height_at_coords(
+        self,
+        world_coords: Float[Array, "*batch 3"],
+    ) -> Float[Array, "*batch"]:
+        """Interpolates heightmap surface height at given world coordinates.
+
+        Args:
+            world_coords: Coordinates in the world frame (*batch, 3).
+
+        Returns:
+            Interpolated heightmap surface height in the heightmap's local frame (*batch).
+        """
+        # Transform world coords to heightmap local frame.
+        local_coords = self.pose.inverse().apply(world_coords)
+        sx, sy = local_coords[..., 0], local_coords[..., 1]
+
+        # Calculate continuous grid indices (r, c) from local coords (sx, sy)
+        # Origin (0,0) in local frame corresponds to center of the base grid!
+        c_cont = sx / self.x_scale + (self.cols - 1) / 2.0
+        r_cont = sy / self.y_scale + (self.rows - 1) / 2.0
+
+        # Interpolate height data at (r_cont, c_cont).
+        batch_axes = self.get_batch_axes()
+        # Ensure batch axes of coords match heightmap's batch axes.
+        target_batch_shape = jnp.broadcast_shapes(batch_axes, world_coords.shape[:-1])
+        coords_bc = jnp.broadcast_to(
+            jnp.stack([r_cont, c_cont], axis=-1), target_batch_shape + (2,)
+        )
+        hm_data_bc = jnp.broadcast_to(
+            self.height_data, target_batch_shape + self.height_data.shape[-2:]
+        )
+
+        if target_batch_shape:
+            batch_size = onp.prod(target_batch_shape).item()
+            # Reshape for vmap.
+            h_data_flat = hm_data_bc.reshape((batch_size, self.rows, self.cols))
+            coords_flat = coords_bc.reshape((batch_size, 2))
+
+            # vmap over flattened batch dimension.
+            vmap_interpolate = jax.vmap(
+                lambda h, c: jax.scipy.ndimage.map_coordinates(
+                    h, c[:, None], order=1, mode='nearest'
+                ).squeeze(),
+                in_axes=(0, 0)
+            )
+            interpolated_heights_flat = vmap_interpolate(h_data_flat, coords_flat)
+            interpolated_heights = interpolated_heights_flat.reshape(target_batch_shape)
+        else:
+            # Non-batched case.
+            interpolated_heights = jax.scipy.ndimage.map_coordinates(
+                hm_data_bc,
+                (coords_bc[0:1], coords_bc[1:2]), # ([r_cont], [c_cont])
+                order=1, mode='nearest'
+            ).squeeze()
+
+        # Scale interpolated height
+        interpolated_local_z = interpolated_heights * self.height_scale
+        return interpolated_local_z
+
+    def _get_vertices_local(self) -> Float[Array, "*batch H*W 3"]:
+        """Computes the heightmap vertices in its local frame using JAX.
+
+        Returns:
+            Vertices array with shape (*batch, H*W, 3).
+        """
+        batch_axes = self.get_batch_axes()
+        H, W = self.rows, self.cols
+
+        # Create grid coordinates (centered).
+        x = (jnp.arange(W) - (W - 1) / 2.0) * self.x_scale[..., None]
+        y = (jnp.arange(H) - (H - 1) / 2.0) * self.y_scale[..., None]
+
+        # Add batch dimensions for meshgrid if necessary.
+        if batch_axes:
+            x = jnp.broadcast_to(x, batch_axes + (W,))
+            y = jnp.broadcast_to(y, batch_axes + (H,))
+            xx, yy = jnp.meshgrid(x, y, indexing='xy') # Results shape (*batch, H, W).
+        else:
+            xx, yy = jnp.meshgrid(x, y, indexing='xy') # Results shape (H, W).
+
+        # Scale height data.
+        zz = self.height_data * self.height_scale[..., None, None]
+
+        # Combine into vertices: (*batch, H, W, 3).
+        vertices = jnp.stack([xx, yy, zz], axis=-1)
+
+        # Reshape to (*batch, H*W, 3).
+        vertices_flat = vertices.reshape(batch_axes + (H * W, 3))
+        return vertices_flat
+
+    def broadcast_to(self, *shape: int) -> Self:
+        """Broadcast geometry to given shape."""
+        new_pose_wxyz_xyz = jnp.broadcast_to(self.pose.wxyz_xyz, shape + (7,))
+        new_pose = jaxlie.SE3(new_pose_wxyz_xyz)
+        shape_dim = self.size.shape[-1]
+        new_size = jnp.broadcast_to(self.size, shape + (shape_dim,))
+        new_height_data = jnp.broadcast_to(
+            self.height_data, shape + self.height_data.shape[-2:]
+        )
+        return type(self)(pose=new_pose, size=new_size, height_data=new_height_data)
+
+    def reshape(self, *shape: int) -> Self:
+        """Reshape geometry to given shape."""
+        new_pose_wxyz_xyz = self.pose.wxyz_xyz.reshape(shape + (7,))
+        new_pose = jaxlie.SE3(new_pose_wxyz_xyz)
+        shape_dim = self.size.shape[-1]
+        new_size = self.size.reshape(shape + (shape_dim,))
+        new_height_data = self.height_data.reshape(
+            shape + self.height_data.shape[-2:]
+        )
+        return type(self)(pose=new_pose, size=new_size, height_data=new_height_data)
+
+    def transform(self, transform: jaxlie.SE3) -> Self:
+        """Applies an SE3 transformation to the geometry."""
+        new_pose = transform @ self.pose
+        new_batch_axes = new_pose.get_batch_axes()
+        broadcast_size = jnp.broadcast_to(
+            self.size, new_batch_axes + self.size.shape[-1:]
+        )
+        broadcast_height_data = jnp.broadcast_to(
+            self.height_data, new_batch_axes + self.height_data.shape[-2:]
+        )
+        return type(self)(
+            pose=new_pose,
+            size=broadcast_size,
+            height_data=broadcast_height_data,
+        )
+
+    def _create_one_mesh(self, index: tuple) -> trimesh.Trimesh:
+        """Create a single trimesh object from height data at a given index.
+        Also includes back-facing triangles for two-sided rendering.
+        """
+        pose_i: jaxlie.SE3 = jax.tree_map(lambda x: x[index], self.pose)
+        height_data_i: Float[Array, "H W"] = self.height_data[index]
+        x_scale_i = float(self.x_scale[index])
+        y_scale_i = float(self.y_scale[index])
+        height_scale_i = float(self.height_scale[index])
+
+        rows, cols = height_data_i.shape
+        if rows < 2 or cols < 2:
+            # Need at least a 2x2 grid to form a face.
+            return trimesh.Trimesh()
+
+        # Create vertex grid.
+        x = onp.arange(cols) * x_scale_i
+        y = onp.arange(rows) * y_scale_i
+        xx, yy = onp.meshgrid(x, y)
+        zz = onp.array(height_data_i) * height_scale_i
+
+        vertices = onp.vstack([xx.ravel(), yy.ravel(), zz.ravel()]).T
+
+        # Center the vertices around the origin before applying pose.
+        center_offset = onp.array(
+            [(cols - 1) * x_scale_i / 2.0, (rows - 1) * y_scale_i / 2.0, 0.0]
+        )
+        vertices -= center_offset
+
+        # Create faces (triangles) - both front and back.
+        front_faces = []
+        back_faces = []
+        for r in range(rows - 1):
+            for c in range(cols - 1):
+                idx0 = r * cols + c
+                idx1 = r * cols + (c + 1)
+                idx2 = (r + 1) * cols + c
+                idx3 = (r + 1) * cols + (c + 1)
+                front_faces.append([idx0, idx1, idx2])  # Triangle 1 (front)
+                front_faces.append([idx1, idx3, idx2])  # Triangle 2 (front)
+                back_faces.append([idx0, idx2, idx1])   # Triangle 1 (back)
+                back_faces.append([idx1, idx2, idx3])   # Triangle 2 (back)
+
+        all_faces = front_faces + back_faces
+
+        if not all_faces:
+            return trimesh.Trimesh()
+
+        heightmap_mesh = trimesh.Trimesh(vertices=vertices, faces=all_faces)
+
+        tf = onp.array(pose_i.as_matrix())
+        heightmap_mesh.apply_transform(tf)
+
+        return heightmap_mesh
+

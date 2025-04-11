@@ -7,7 +7,7 @@ import jax.numpy as jnp
 import jax_dataclasses as jdc
 from jaxtyping import Float, Array
 
-from ._geometry import CollGeom, HalfSpace, Sphere, Capsule, Box
+from ._geometry import CollGeom, HalfSpace, Sphere, Capsule, Box, Heightmap
 from ._geometry_pairs import (
     halfspace_sphere,
     halfspace_capsule,
@@ -17,6 +17,10 @@ from ._geometry_pairs import (
     sphere_box,
     capsule_capsule,
     capsule_box,
+    heightmap_sphere,
+    heightmap_capsule,
+    heightmap_halfspace,
+    heightmap_box,
 )
 
 COLLISION_FUNCTIONS: Dict[
@@ -30,6 +34,10 @@ COLLISION_FUNCTIONS: Dict[
     (Sphere, Box): sphere_box,
     (Capsule, Capsule): capsule_capsule,
     (Capsule, Box): capsule_box,
+    (Heightmap, Sphere): heightmap_sphere,
+    (Heightmap, Capsule): heightmap_capsule,
+    (Heightmap, HalfSpace): heightmap_halfspace,
+    (Heightmap, Box): heightmap_box,
 }
 
 
