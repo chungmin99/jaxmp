@@ -18,7 +18,7 @@ from ._preconditioning import (
 
 from ._sparse_matrices import BlockRowSparseMatrix, SparseCooMatrix, SparseCsrMatrix
 from ._variables import VarTypeOrdering, VarValues
-from .utils import jax_log
+from ..utils import jax_log
 
 if TYPE_CHECKING:
     import sksparse.cholmod

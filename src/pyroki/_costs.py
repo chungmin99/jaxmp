@@ -3,8 +3,6 @@ from jax import Array
 import jax.numpy as jnp
 import jax_dataclasses as jdc
 import jaxlie
-from jax import numpy as jnp
-from jaxtyping import Float
 
 from . import optim
 from ._robot import Robot
@@ -22,7 +20,7 @@ from .coll._collision import colldist_from_sdf
 @jdc.pytree_dataclass
 class PoseCost(CostFactor[optim.Var[Array], jaxlie.SE3]):
     robot: Robot
-    target_joint_indices: Array
+    target_link_indices: Array
 
     def cost_fn(
         self,
@@ -31,9 +29,10 @@ class PoseCost(CostFactor[optim.Var[Array], jaxlie.SE3]):
         target_pose: jaxlie.SE3,
     ) -> Array:
         """Pose cost."""
+        assert self.target_link_indices.dtype == jnp.int32
         joint_cfg = vals[joint_var]
-        Ts_joint_world = self.robot.forward_kinematics(joint_cfg)
-        pose = jaxlie.SE3(Ts_joint_world[self.target_joint_indices])
+        Ts_link_world = self.robot.forward_kinematics(joint_cfg)
+        pose = jaxlie.SE3(Ts_link_world[self.target_link_indices])
         residual = (pose.inverse() @ target_pose).log()
         return residual
 
@@ -41,7 +40,7 @@ class PoseCost(CostFactor[optim.Var[Array], jaxlie.SE3]):
 @jdc.pytree_dataclass
 class PoseCostWithBase(CostFactor[optim.Var[Array], optim.Var[jaxlie.SE3], jaxlie.SE3]):
     robot: Robot
-    target_joint_indices: Array
+    target_link_indices: Array
 
     def cost_fn(
         self,
@@ -51,13 +50,14 @@ class PoseCostWithBase(CostFactor[optim.Var[Array], optim.Var[jaxlie.SE3], jaxli
         T_world_target: jaxlie.SE3,
     ) -> Array:
         """Pose cost with base."""
+        assert self.target_link_indices.dtype == jnp.int32
         joint_cfg = vals[joint_var]
         T_world_base = vals[T_world_base_var]
-        Ts_joint_world = self.robot.forward_kinematics(joint_cfg)
-        T_base_target = jaxlie.SE3(Ts_joint_world[self.target_joint_indices])
-        T_world_target_desired = T_world_base @ T_base_target
+        Ts_link_world = self.robot.forward_kinematics(joint_cfg)
+        T_base_target_link = jaxlie.SE3(Ts_link_world[self.target_link_indices])
+        T_world_target_link_actual = T_world_base @ T_base_target_link
 
-        residual = (T_world_target_desired.inverse() @ T_world_target).log()
+        residual = (T_world_target_link_actual.inverse() @ T_world_target).log()
         return residual
 
 
@@ -145,7 +145,7 @@ class SmoothnessCost(CostFactor[optim.Var[Array], optim.Var[Array]]):
 @jdc.pytree_dataclass
 class ManipulabilityCost(CostFactor[optim.Var[Array]]):
     robot: Robot
-    target_joint_indices: Array
+    target_link_indices: Array
 
     def cost_fn(
         self,
@@ -156,22 +156,22 @@ class ManipulabilityCost(CostFactor[optim.Var[Array]]):
 
         Sums the inverse manipulability across potentially multiple target indices.
         """
-        # Vmap over the target_joint_indices
-        vmapped_manip_yoshikawa = jax.vmap(
-            self.manip_yoshikawa, in_axes=(None, None, 0)
+        vmapped_manip_yoshikawa = jax.vmap(self.manip_yoshikawa, in_axes=(None, 0))
+        manipulabilities = vmapped_manip_yoshikawa(
+            vals[joint_var], self.target_link_indices
         )
-        manipulabilities = vmapped_manip_yoshikawa(vals[joint_var])
         return 1 / (manipulabilities + 1e-6)
 
     def manip_yoshikawa(
         self,
         cfg: Array,
+        target_link_index: jax.Array,
     ) -> Array:
         """Manipulability, as the determinant of the Jacobian (translation only)."""
-        jacobian = jax.jacfwd(
-            lambda cfg: jaxlie.SE3(self.robot.forward_kinematics(cfg)).translation()
+        jacobian_all_links = jax.jacfwd(
+            lambda q: jaxlie.SE3(self.robot.forward_kinematics(q)).translation()
         )(cfg)
-        jacobian = jacobian[self.target_joint_indices].squeeze()
+        jacobian = jacobian_all_links[target_link_index]
         JJT = jacobian @ jacobian.T
         assert JJT.shape == (3, 3)
         return jnp.sqrt(jnp.linalg.det(JJT))

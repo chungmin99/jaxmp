@@ -257,7 +257,7 @@ class RobotCollision:
             self.link_names == robot.link.names
         ), "Link name mismatch between RobotCollision and Robot kinematics."
 
-        Ts_link_world_wxyz_xyz = robot.forward_kinematics_links(cfg)
+        Ts_link_world_wxyz_xyz = robot.forward_kinematics(cfg)
         Ts_link_world = jaxlie.SE3(Ts_link_world_wxyz_xyz)
 
         return self.coll.transform(Ts_link_world)

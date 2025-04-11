@@ -1,4 +1,3 @@
-from . import utils as utils
 from ._factor_graph import Factor as Factor
 from ._factor_graph import FactorGraph as FactorGraph
 from ._solvers import ConjugateGradientConfig as ConjugateGradientConfig

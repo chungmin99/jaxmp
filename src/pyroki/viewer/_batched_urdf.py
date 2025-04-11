@@ -73,7 +73,7 @@ class BatchedURDF:
                 mesh.remove()
 
     def update_cfg(self, cfg: jnp.ndarray):
-        Ts_link_world = self._robot.forward_kinematics_links(cfg)
+        Ts_link_world = self._robot.forward_kinematics(cfg)
         for link_name, meshes in self._meshes.items():
             link_idx = self._robot.link.names.index(link_name)
             T_mesh_world = jaxlie.SE3(Ts_link_world[link_idx])

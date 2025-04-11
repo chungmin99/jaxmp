@@ -66,15 +66,18 @@ class Robot:
     def forward_kinematics(
         self,
         cfg: Float[Array, "*batch actuated_count"],
-    ) -> Float[Array, "*batch count 7"]:
-        """
-        Run forward kinematics on the robot, in the provided configuration.
+    ) -> Float[Array, "*batch link_count 7"]:
+        """Run forward kinematics on the robot's links, in the provided configuration.
+
+        Computes the world pose of each link frame.
+        The result is ordered corresponding to `self.link.names`.
 
         Args:
             cfg: The configuration of the actuated joints, in the format `(*batch actuated_count)`.
 
         Returns:
-            The SE(3) transforms of the joints, in the format `(*batch count wxyz_xyz)`.
+            The SE(3) transforms of the links, ordered by `self.link.names`,
+            in the format `(*batch link_count wxyz_xyz)`.
         """
         batch_axes = cfg.shape[:-1]
         assert cfg.shape == (*batch_axes, self.joint.actuated_count)
@@ -91,89 +94,70 @@ class Robot:
         Ts_parent_child = (jaxlie.SE3(self.joint.parent_transforms) @ delta_Ts).wxyz_xyz
         assert Ts_parent_child.shape == (*batch_axes, self.joint.count, 7)
 
-        # In this function we leverage two index mappings:
-        # 1. sort_order: map original_idx -> sorted_idx.
-        # 2. self.joint.topo_sort_inv: map sorted_idx -> original_idx.
-        # We use these mappings to convert between the original and topologically sorted orderings.
-
-        # 1. Calculate topological sort order (original -> sorted).
+        # Topological sort helpers
         topo_order = jnp.argsort(self.joint._topo_sort_inv)
-
-        # 2. Convert Ts_parent_child to topologically sorted order.
-        # This is slightly counterintuitive:
-        #   output[..., i, :] gets populated with the value from input[..., self.joint.topo_sort_inv[i], :].
-        #   Since self.joint.topo_sort_inv[i] gives the original index for sorted index i,
-        #   this correctly gathers the transforms from their original positions into the new sorted order.
         Ts_parent_child_sorted = Ts_parent_child[..., self.joint._topo_sort_inv, :]
-
-        # 3. Calculate parent's original_idx for each child's sorted_idx.
         parent_orig_for_sorted_child = self.joint.parent_indices[
             self.joint._topo_sort_inv
         ]
-
-        # 4. Calculate parent's sorted_idx for each child's sorted_idx.
         idx_parent_joint_sorted = jnp.where(
             parent_orig_for_sorted_child == -1,
             -1,
             topo_order[parent_orig_for_sorted_child],
         )
 
-        # 5. Compute transforms, within topologically sorted order.
-        def compute_joint(i: int, Ts_world_joint_sorted: Array) -> Array:
+        # Compute link transforms relative to world, indexed by sorted *joint* index
+        def compute_transform(i: int, Ts_world_link_sorted: Array) -> Array:
             parent_sorted_idx = idx_parent_joint_sorted[i]
-            T_world_parent = jnp.where(
+            T_world_parent_link = jnp.where(
                 parent_sorted_idx == -1,
                 jaxlie.SE3.identity().wxyz_xyz,
-                Ts_world_joint_sorted[..., parent_sorted_idx, :],
+                Ts_world_link_sorted[..., parent_sorted_idx, :],
             )
-            return Ts_world_joint_sorted.at[..., i, :].set(
+            return Ts_world_link_sorted.at[..., i, :].set(
                 (
-                    jaxlie.SE3(T_world_parent)
+                    jaxlie.SE3(T_world_parent_link)
                     @ jaxlie.SE3(Ts_parent_child_sorted[..., i, :])
                 ).wxyz_xyz
             )
 
-        Ts_world_joint_init_sorted = jnp.zeros((*batch_axes, self.joint.count, 7))
-        Ts_world_joint_sorted = jax.lax.fori_loop(
+        Ts_world_link_init_sorted = jnp.zeros((*batch_axes, self.joint.count, 7))
+        Ts_world_link_sorted = jax.lax.fori_loop(
             lower=0,
             upper=self.joint.count,
-            body_fun=compute_joint,
-            init_val=Ts_world_joint_init_sorted,
+            body_fun=compute_transform,
+            init_val=Ts_world_link_init_sorted,
             unroll=self.unroll_fk,
         )
 
-        # 6. Gather elements into original order using sort_order (original_idx -> sorted_idx).
-        Ts_world_joint = Ts_world_joint_sorted[..., topo_order, :]
-        assert Ts_world_joint.shape == (
+        Ts_world_link_joint_indexed = Ts_world_link_sorted[..., topo_order, :]
+        assert Ts_world_link_joint_indexed.shape == (
             *batch_axes,
             self.joint.count,
             7,
+        ) # This is the link poses indexed by parent *joint* index.
+
+        # Get the link poses.
+        base_link_mask = self.link.parent_joint_indices == -1
+        parent_joint_indices = jnp.where(
+            base_link_mask, 0, self.link.parent_joint_indices
         )
-
-        return Ts_world_joint
-
-    @jdc.jit
-    def forward_kinematics_links(
-        self,
-        cfg: Float[Array, "*batch actuated_count"],
-    ) -> Float[Array, "*batch link_count 7"]:
-        """Run forward kinematics on the robot's links, in the provided configuration.
-
-        Returns transforms in the order corresponding to `self.link.names`.
-        """
-        Ts_joint_world = self.forward_kinematics(cfg)
+        Ts_link_world_gathered = jnp.take(
+            Ts_world_link_joint_indexed, parent_joint_indices, axis=-2
+        )
+        identity_pose = jaxlie.SE3.identity().wxyz_xyz
         Ts_link_world = jnp.where(
-            (self.link.parent_joint_indices == -1)[..., None],
-            jaxlie.SE3.identity().wxyz_xyz,
-            Ts_joint_world[..., self.link.parent_joint_indices, :],
+            base_link_mask[..., None], identity_pose[None, :], Ts_link_world_gathered
         )
+
+        assert Ts_link_world.shape == (*batch_axes, self.link.count, 7)
         return Ts_link_world
 
     @staticmethod
     def get_joint_var_class(
         default_val: Float[Array, "* actuated_count"],
         num_actuated_joints: int,
-        joint_vel_limit: Float[Array, " actuated_count"],
+        joint_vel_limit: Float[Array, "* actuated_count"],
     ) -> type[optim.Var[Array]]:
         """Return a variable class for the robot configuration,
         considering different joint units for revolute/prismatic joints."""
