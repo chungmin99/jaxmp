@@ -13,3 +13,4 @@ from ._costs import RestCostWithBase as RestCostWithBase
 from ._costs import SmoothnessCost as SmoothnessCost
 
 from . import viewer as viewer
+from . import optim as optim

@@ -7,9 +7,9 @@ import yourdfpy
 
 from jax import Array
 from jax import numpy as jnp
-from jaxtyping import Float, Int
+from jaxtyping import Float
 
-import jaxls
+from . import optim
 
 from ._robot_urdf_parser import JointInfo, LinkInfo, RobotURDFParser
 
@@ -27,7 +27,7 @@ class Robot:
     unroll_fk: jdc.Static[bool]
     """Whether to unroll the forward kinematics `fori_loop`."""
 
-    JointVar: jdc.Static[type[jaxls.Var[Array]]]
+    JointVar: jdc.Static[type[optim.Var[Array]]]
     """Variable class for the robot configuration."""
 
     @staticmethod
@@ -174,7 +174,7 @@ class Robot:
         default_val: Float[Array, "* actuated_count"],
         num_actuated_joints: int,
         joint_vel_limit: Float[Array, " actuated_count"],
-    ) -> type[jaxls.Var[Array]]:
+    ) -> type[optim.Var[Array]]:
         """Return a variable class for the robot configuration,
         considering different joint units for revolute/prismatic joints."""
 
@@ -194,7 +194,7 @@ class Robot:
             return cfg + _delta
 
         class JointVar(  # pylint: disable=missing-class-docstring
-            jaxls.Var[Array],
+            optim.Var[Array],
             default_factory=lambda: default_val.copy(),
             tangent_dim=num_actuated_joints,
             retract_fn=retract_fn,

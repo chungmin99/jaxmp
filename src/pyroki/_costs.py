@@ -3,8 +3,10 @@ from jax import Array
 import jax.numpy as jnp
 import jax_dataclasses as jdc
 import jaxlie
-import jaxls
+from jax import numpy as jnp
+from jaxtyping import Float
 
+from . import optim
 from ._robot import Robot
 from ._solver import CostFactor
 
@@ -18,14 +20,14 @@ from .coll._collision import colldist_from_sdf
 
 
 @jdc.pytree_dataclass
-class PoseCost(CostFactor[jaxls.Var[Array], jaxlie.SE3]):
+class PoseCost(CostFactor[optim.Var[Array], jaxlie.SE3]):
     robot: Robot
     target_joint_indices: Array
 
     def cost_fn(
         self,
-        vals: jaxls.VarValues,
-        joint_var: jaxls.Var[Array],
+        vals: optim.VarValues,
+        joint_var: optim.Var[Array],
         target_pose: jaxlie.SE3,
     ) -> Array:
         """Pose cost."""
@@ -37,15 +39,15 @@ class PoseCost(CostFactor[jaxls.Var[Array], jaxlie.SE3]):
 
 
 @jdc.pytree_dataclass
-class PoseCostWithBase(CostFactor[jaxls.Var[Array], jaxls.Var[jaxlie.SE3], jaxlie.SE3]):
+class PoseCostWithBase(CostFactor[optim.Var[Array], optim.Var[jaxlie.SE3], jaxlie.SE3]):
     robot: Robot
     target_joint_indices: Array
 
     def cost_fn(
         self,
-        vals: jaxls.VarValues,
-        joint_var: jaxls.Var[Array],
-        T_world_base_var: jaxls.Var[jaxlie.SE3],
+        vals: optim.VarValues,
+        joint_var: optim.Var[Array],
+        T_world_base_var: optim.Var[jaxlie.SE3],
         T_world_target: jaxlie.SE3,
     ) -> Array:
         """Pose cost with base."""
@@ -60,13 +62,13 @@ class PoseCostWithBase(CostFactor[jaxls.Var[Array], jaxls.Var[jaxlie.SE3], jaxli
 
 
 @jdc.pytree_dataclass
-class LimitCost(CostFactor[jaxls.Var[Array]]):
+class LimitCost(CostFactor[optim.Var[Array]]):
     robot: Robot
 
     def cost_fn(
         self,
-        vals: jaxls.VarValues,
-        joint_var: jaxls.Var[Array],
+        vals: optim.VarValues,
+        joint_var: optim.Var[Array],
     ) -> Array:
         """Limit cost."""
         joint_cfg = vals[joint_var]
@@ -81,15 +83,15 @@ class LimitCost(CostFactor[jaxls.Var[Array]]):
 
 
 @jdc.pytree_dataclass
-class LimitVelCost(CostFactor[jaxls.Var[Array], jaxls.Var[Array]]):
+class LimitVelCost(CostFactor[optim.Var[Array], optim.Var[Array]]):
     robot: Robot
     dt: float
 
     def cost_fn(
         self,
-        vals: jaxls.VarValues,
-        joint_var: jaxls.Var[Array],
-        prev_joint_var: jaxls.Var[Array],
+        vals: optim.VarValues,
+        joint_var: optim.Var[Array],
+        prev_joint_var: optim.Var[Array],
     ) -> Array:
         """Joint limit velocity cost."""
         joint_vel = (vals[joint_var] - vals[prev_joint_var]) / self.dt
@@ -100,27 +102,27 @@ class LimitVelCost(CostFactor[jaxls.Var[Array], jaxls.Var[Array]]):
 
 
 @jdc.pytree_dataclass
-class RestCost(CostFactor[jaxls.Var[Array]]):
+class RestCost(CostFactor[optim.Var[Array]]):
     rest_pose: Array
 
     def cost_fn(
         self,
-        vals: jaxls.VarValues,
-        joint_var: jaxls.Var[Array],
+        vals: optim.VarValues,
+        joint_var: optim.Var[Array],
     ) -> Array:
         """Bias towards joints at the specified rest pose."""
         return vals[joint_var] - self.rest_pose
 
 
 @jdc.pytree_dataclass
-class RestCostWithBase(CostFactor[jaxls.Var[Array], jaxls.Var[jaxlie.SE3]]):
+class RestCostWithBase(CostFactor[optim.Var[Array], optim.Var[jaxlie.SE3]]):
     rest_pose: Array
 
     def cost_fn(
         self,
-        vals: jaxls.VarValues,
-        joint_var: jaxls.Var[Array],
-        T_world_base_var: jaxls.Var[jaxlie.SE3],
+        vals: optim.VarValues,
+        joint_var: optim.Var[Array],
+        T_world_base_var: optim.Var[jaxlie.SE3],
     ) -> Array:
         """Bias towards joints at the specified rest pose and identity base pose."""
         residual_joints = vals[joint_var] - self.rest_pose
@@ -129,26 +131,26 @@ class RestCostWithBase(CostFactor[jaxls.Var[Array], jaxls.Var[jaxlie.SE3]]):
 
 
 @jdc.pytree_dataclass
-class SmoothnessCost(CostFactor[jaxls.Var[Array], jaxls.Var[Array]]):
+class SmoothnessCost(CostFactor[optim.Var[Array], optim.Var[Array]]):
     def cost_fn(
         self,
-        vals: jaxls.VarValues,
-        curr_joint_var: jaxls.Var[Array],
-        past_joint_var: jaxls.Var[Array],
+        vals: optim.VarValues,
+        curr_joint_var: optim.Var[Array],
+        past_joint_var: optim.Var[Array],
     ) -> Array:
         """Smoothness cost, for trajectories etc."""
         return vals[curr_joint_var] - vals[past_joint_var]
 
 
 @jdc.pytree_dataclass
-class ManipulabilityCost(CostFactor[jaxls.Var[Array]]):
+class ManipulabilityCost(CostFactor[optim.Var[Array]]):
     robot: Robot
     target_joint_indices: Array
 
     def cost_fn(
         self,
-        vals: jaxls.VarValues,
-        joint_var: jaxls.Var[Array],
+        vals: optim.VarValues,
+        joint_var: optim.Var[Array],
     ) -> Array:
         """Manipulability cost (translation only).
 
@@ -176,15 +178,15 @@ class ManipulabilityCost(CostFactor[jaxls.Var[Array]]):
 
 
 @jdc.pytree_dataclass
-class SelfCollisionCost(CostFactor[jaxls.Var[Array]]):
+class SelfCollisionCost(CostFactor[optim.Var[Array]]):
     robot: Robot
     robot_coll: RobotCollision
     margin: float
 
     def cost_fn(
         self,
-        vals: jaxls.VarValues,
-        joint_var: jaxls.Var[Array],
+        vals: optim.VarValues,
+        joint_var: optim.Var[Array],
     ) -> Array:
         """Cost penalizing self-collisions below a margin using smooth activation.
 
@@ -201,7 +203,7 @@ class SelfCollisionCost(CostFactor[jaxls.Var[Array]]):
 
 
 @jdc.pytree_dataclass
-class WorldCollisionCost(CostFactor[jaxls.Var[Array]]):
+class WorldCollisionCost(CostFactor[optim.Var[Array]]):
     robot: Robot
     robot_coll: RobotCollision
     margin: float
@@ -209,8 +211,8 @@ class WorldCollisionCost(CostFactor[jaxls.Var[Array]]):
 
     def cost_fn(
         self,
-        vals: jaxls.VarValues,
-        joint_var: jaxls.Var[Array],
+        vals: optim.VarValues,
+        joint_var: optim.Var[Array],
     ) -> Array:
         """Cost penalizing world collisions below a margin using smooth activation.
 
