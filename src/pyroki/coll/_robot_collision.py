@@ -31,9 +31,9 @@ class RobotCollision:
     coll: CollGeom
     """Collision geometries for the robot (relative to their parent link frame)."""
 
-    active_idx_i: jdc.Static[Int[Array, " P"]]
+    active_idx_i: Int[Array, " P"]
     """Row indices (first link) of active self-collision pairs to check."""
-    active_idx_j: jdc.Static[Int[Array, " P"]]
+    active_idx_j: Int[Array, " P"]
     """Column indices (second link) of active self-collision pairs to check."""
 
     @staticmethod
