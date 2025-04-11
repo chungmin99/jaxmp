@@ -9,6 +9,7 @@ from jax import Array
 from jax import numpy as jnp
 from jaxtyping import Float, Int, Bool
 import jaxlie
+import numpy as onp
 
 
 @jdc.pytree_dataclass
@@ -400,7 +401,15 @@ class RobotURDFParser:
     ) -> tuple[int, Array]:
         """Get the transform from the parent joint to the current joint,
         as well as the parent joint index."""
-        assert joint.origin.shape == (4, 4)
+        # Handle case where joint origin might be None (e.g., base link)
+        if joint.origin is None:
+            logger.debug(
+                f"Joint '{joint.name}' has no origin, assuming identity transform."
+            )
+            T_parent_joint = onp.eye(4)
+        else:
+            assert joint.origin.shape == (4, 4)
+            T_parent_joint = joint.origin
 
         joint_from_child = {j.child: j for j in urdf.joint_map.values()}
         joint_name_to_idx = {j.name: i for i, j in enumerate(urdf.joint_map.values())}
