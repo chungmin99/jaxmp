@@ -225,3 +225,127 @@ class WorldCollisionCost(CostFactor[optim.Var[Array]]):
         )
         residual = colldist_from_sdf(dist_matrix, self.margin)
         return residual
+
+
+@jdc.pytree_dataclass
+class FivePointVelocityCost(
+    CostFactor[
+        optim.Var[Array],  # t+2
+        optim.Var[Array],  # t+1
+        optim.Var[Array],  # t-1
+        optim.Var[Array],  # t-2
+    ]
+):
+    """Cost penalizing deviation from joint velocity limits using a five-point stencil.
+
+    Requires `robot.joint.velocity_limits_act` to be defined.
+    Should be applied to variable indices `t = 2` to `N-3` for a trajectory of length `N`.
+    """
+
+    robot: Robot
+    dt: float
+
+    def cost_fn(
+        self,
+        vals: optim.VarValues,
+        var_t_plus_2: optim.Var[Array],
+        var_t_plus_1: optim.Var[Array],
+        var_t_minus_1: optim.Var[Array],
+        var_t_minus_2: optim.Var[Array],
+    ) -> Array:
+        q_tm2, q_tm1, q_tp1, q_tp2 = (
+            vals[var_t_minus_2],
+            vals[var_t_minus_1],
+            vals[var_t_plus_1],
+            vals[var_t_plus_2],
+        )
+        velocity = (-q_tp2 + 8 * q_tp1 - 8 * q_tm1 + q_tm2) / (12 * self.dt)
+        try:
+            # Use actuated velocity limits
+            vel_limits = self.robot.joint.velocity_limits_act
+        except AttributeError:
+            # Fallback if limits are not defined (cost becomes zero)
+            vel_limits = jnp.inf
+        limit_violation = jnp.maximum(0.0, jnp.abs(velocity) - vel_limits)
+        return limit_violation
+
+
+@jdc.pytree_dataclass
+class FivePointAccelerationCost(
+    CostFactor[
+        optim.Var[Array],  # t
+        optim.Var[Array],  # t+2
+        optim.Var[Array],  # t+1
+        optim.Var[Array],  # t-1
+        optim.Var[Array],  # t-2
+    ]
+):
+    """Cost minimizing joint acceleration using a five-point stencil.
+
+    Should be applied to variable indices `t = 2` to `N-3` for a trajectory of length `N`.
+    """
+
+    dt: float
+
+    def cost_fn(
+        self,
+        vals: optim.VarValues,
+        var_t: optim.Var[Array],
+        var_t_plus_2: optim.Var[Array],
+        var_t_plus_1: optim.Var[Array],
+        var_t_minus_1: optim.Var[Array],
+        var_t_minus_2: optim.Var[Array],
+    ) -> Array:
+        q_tm2, q_tm1, q_t, q_tp1, q_tp2 = (
+            vals[var_t_minus_2],
+            vals[var_t_minus_1],
+            vals[var_t],
+            vals[var_t_plus_1],
+            vals[var_t_plus_2],
+        )
+        acceleration = (-q_tp2 + 16 * q_tp1 - 30 * q_t + 16 * q_tm1 - q_tm2) / (
+            12 * self.dt**2
+        )
+        return acceleration
+
+
+@jdc.pytree_dataclass
+class FivePointJerkCost(
+    CostFactor[
+        optim.Var[Array],  # t+3
+        optim.Var[Array],  # t+2
+        optim.Var[Array],  # t+1
+        optim.Var[Array],  # t-1
+        optim.Var[Array],  # t-2
+        optim.Var[Array],  # t-3
+    ]
+):
+    """Cost minimizing joint jerk using a seven-point stencil.
+
+    Should be applied to variable indices `t = 3` to `N-4` for a trajectory of length `N`.
+    """
+
+    dt: float
+
+    def cost_fn(
+        self,
+        vals: optim.VarValues,
+        var_t_plus_3: optim.Var[Array],
+        var_t_plus_2: optim.Var[Array],
+        var_t_plus_1: optim.Var[Array],
+        var_t_minus_1: optim.Var[Array],
+        var_t_minus_2: optim.Var[Array],
+        var_t_minus_3: optim.Var[Array],
+    ) -> Array:
+        q_tm3, q_tm2, q_tm1, q_tp1, q_tp2, q_tp3 = (
+            vals[var_t_minus_3],
+            vals[var_t_minus_2],
+            vals[var_t_minus_1],
+            vals[var_t_plus_1],
+            vals[var_t_plus_2],
+            vals[var_t_plus_3],
+        )
+        jerk = (-q_tp3 + 8 * q_tp2 - 13 * q_tp1 + 13 * q_tm1 - 8 * q_tm2 + q_tm3) / (
+            8 * self.dt**3
+        )
+        return jerk

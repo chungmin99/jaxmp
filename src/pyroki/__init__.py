@@ -12,6 +12,9 @@ from ._costs import SelfCollisionCost as SelfCollisionCost
 from ._costs import WorldCollisionCost as WorldCollisionCost
 from ._costs import RestCostWithBase as RestCostWithBase
 from ._costs import SmoothnessCost as SmoothnessCost
+from ._costs import FivePointVelocityCost as FivePointVelocityCost
+from ._costs import FivePointAccelerationCost as FivePointAccelerationCost
+from ._costs import FivePointJerkCost as FivePointJerkCost
 
 from . import viewer as viewer
 from . import optim as optim
