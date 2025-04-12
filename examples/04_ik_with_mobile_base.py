@@ -15,8 +15,6 @@ import tyro
 import viser
 from loguru import logger
 
-import jaxls
-
 import pyroki as pk
 from pyroki.viewer import BatchedURDF
 
@@ -60,10 +58,10 @@ def solve_ik(
     def retract_fn(transform: jaxlie.SE3, delta: jax.Array) -> jaxlie.SE3:
         """Same as jaxls.SE3Var.retract_fn, but removing updates on certain axes."""
         delta = delta * (1 - base_constraint_flags)
-        return jaxls.SE3Var.retract_fn(transform, delta)
+        return pk.optim.SE3Var.retract_fn(transform, delta)
 
     class ConstrainedSE3Var(
-        jaxls.Var[jaxlie.SE3],
+        pk.optim.Var[jaxlie.SE3],
         default_factory=lambda: jaxlie.SE3.identity(),
         tangent_dim=jaxlie.SE3.tangent_dim,
         retract_fn=retract_fn,
@@ -92,15 +90,15 @@ def solve_ik(
         ),
         pk.LimitCost(
             (joint_var,),
-            robot=robot, 
-            weights=jnp.array([limit_weight] * robot.joint.count)
+            robot=robot,
+            weights=jnp.array([limit_weight] * robot.joint.count),
         ),
         pk.RestCostWithBase(
             (
                 joint_var,
                 base_pose_var,
             ),
-            rest_pose=rest_pose_for_cost, # Pass the determined rest pose
+            rest_pose=rest_pose_for_cost,  # Pass the determined rest pose
             weights=jnp.array(
                 [rest_weight] * robot.joint.actuated_count
                 + [base_constraint_cost_weight] * 6
@@ -229,7 +227,10 @@ def run_ik_loop(
 
     while True:
         target_link_indices = jnp.array(
-            [robot.link.names.index(h.value) for h in gui_handles["target_link_name_dropdowns"]]
+            [
+                robot.link.names.index(h.value)
+                for h in gui_handles["target_link_name_dropdowns"]
+            ]
         )
         target_poses = jaxlie.SE3(
             jnp.stack(
@@ -287,17 +288,23 @@ def run_ik_loop(
         # urdf_vis.update_base_pose(base_pose) # Original code might not have had this either
         urdf_vis.update_cfg(joints)
 
-        # --- Original Logic for visualizing target frames --- 
+        # --- Original Logic for visualizing target frames ---
         # Get world poses of target frames for visualization
-        Ts_link_base_array = robot.forward_kinematics(joints) # Get link poses relative to base
-        Ts_world_link_object = base_pose @ jaxlie.SE3(Ts_link_base_array) # Transform to world as SE3 object
+        Ts_link_base_array = robot.forward_kinematics(
+            joints
+        )  # Get link poses relative to base
+        Ts_world_link_object = base_pose @ jaxlie.SE3(
+            Ts_link_base_array
+        )  # Transform to world as SE3 object
 
         for i, frame_handle in enumerate(gui_handles["target_frames"]):
             # Index into the numerical array of the SE3 object
-            current_pose = jaxlie.SE3(Ts_world_link_object.wxyz_xyz[target_link_indices[i]])
+            current_pose = jaxlie.SE3(
+                Ts_world_link_object.wxyz_xyz[target_link_indices[i]]
+            )
             frame_handle.position = onp.array(current_pose.translation().squeeze())
             frame_handle.wxyz = onp.array(current_pose.rotation().wxyz.squeeze())
-        # --- End Original Logic --- 
+        # --- End Original Logic ---
 
 
 def main(
