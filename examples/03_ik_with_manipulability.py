@@ -101,7 +101,7 @@ def solve_ik(
     else:
         init_vars = [joint_var]
 
-    sol = pk.solve(vars, factors, init_vars=init_vars, max_iterations=max_iterations)
+    sol, _ = pk.solve(vars, factors, init_vars=init_vars, max_iterations=max_iterations)
     return sol[joint_var]
 
 

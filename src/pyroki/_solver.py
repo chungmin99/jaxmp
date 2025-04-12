@@ -25,8 +25,13 @@ def solve(
     ] = "conjugate_gradient",
     max_iterations: int = 100,
     verbose: bool = False,
-) -> optim.VarValues:
-    """Solve the robot kinematic optimization problem."""
+) -> tuple[optim.VarValues, jax.Array]:
+    """Solve the robot kinematic optimization problem.
+
+    Returns:
+        - solution: The optimized variable values.
+        - residuals: The residuals of the cost factors.
+    """
     factors_jaxls = [cf._make_factor() for cf in factors]
     if len(init_vars) != len(vars):
         if len(init_vars) == 0:
@@ -49,7 +54,8 @@ def solve(
         ),
         verbose=verbose,
     )
-    return solution
+    cost_vector = graph.compute_residual_vector(solution)
+    return solution, cost_vector
 
 
 @jdc.pytree_dataclass

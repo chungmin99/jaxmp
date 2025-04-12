@@ -119,7 +119,7 @@ def solve_ik(
     else:
         init_vars.append(base_pose_var)
 
-    sol = pk.solve(vars, factors, init_vars=init_vars, max_iterations=max_iterations)
+    sol, _ = pk.solve(vars, factors, init_vars=init_vars, max_iterations=max_iterations)
     return sol[base_pose_var], sol[joint_var]
 
 

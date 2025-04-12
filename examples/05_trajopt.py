@@ -71,7 +71,7 @@ def solve_trajopt(
         ),
     ]
 
-    solution = pk.solve(
+    solution, _ = pk.solve(
         vars=[traj_var],
         factors=factors,
         init_vars=[],
