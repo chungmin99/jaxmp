@@ -241,6 +241,71 @@ class Capsule(CollGeom):
         capsule_mesh.apply_transform(tf)
         return capsule_mesh
 
+    def decompose_to_spheres(self, n_segments: int) -> Sphere:
+        """
+        Decompose the capsule into a series of spheres along its axis.
+        Args: n_segments: Number of spheres.
+        Returns: Sphere object shape (n_segments, *batch, ...).
+        """
+        batch_axes = self.get_batch_axes()
+        radii = self.radius
+
+        # Calculate local offsets for sphere centers along z-axis.
+        segment_factors = jnp.linspace(-1.0, 1.0, n_segments)
+        local_offsets_vec = jnp.array([0.0, 0.0, 1.0])[None, None, :] * (
+            segment_factors[:, None, None] * self.length[None, ..., None]
+        )
+
+        # Create base spheres (at origin, correct radius) and transform them.
+        spheres = Sphere.from_center_and_radius(
+            center=jnp.zeros((n_segments,) + batch_axes + (3,)),
+            radius=jnp.broadcast_to(radii, (n_segments,) + batch_axes),
+        )
+
+        # Broadcast capsule pose and apply transforms.
+        capsule_pose_broadcast = jaxlie.SE3(
+            jnp.broadcast_to(
+                self.pose.wxyz_xyz,
+                (n_segments,) + self.pose.get_batch_axes() + (7,),
+            )
+        )
+        spheres = spheres.transform(
+            capsule_pose_broadcast @ jaxlie.SE3.from_translation(local_offsets_vec)
+        )
+        assert spheres.get_batch_axes() == (n_segments,) + batch_axes
+        return spheres
+
+    @staticmethod
+    def from_sphere_pairs(sph_0: Sphere, sph_1: Sphere) -> Capsule:
+        """
+        Create a capsule connecting the centers of two spheres.
+        Args: sph_0, sph_1: Input spheres.
+        Returns: Capsule object with the same batch shape.
+        """
+        assert sph_0.get_batch_axes() == sph_1.get_batch_axes(), "Batch axes mismatch"
+
+        pos0 = sph_0.pose.translation()
+        pos1 = sph_1.pose.translation()
+        vec = pos1 - pos0
+
+        length_sq = jnp.sum(vec**2, axis=-1, keepdims=True)
+        height = jnp.sqrt(length_sq).squeeze(-1)
+
+        transform = jaxlie.SE3.from_rotation_and_translation(
+            rotation=jaxlie.SO3.from_matrix(make_frame(vec)),
+            translation=(pos0 + pos1) / 2.0,
+        )
+
+        capsule = Capsule.from_center_radius_height(
+            center=transform.translation(),
+            orientation_mat=transform.rotation().as_matrix(),
+            radius=sph_0.radius,
+            height=height,
+        )
+
+        assert capsule.get_batch_axes() == sph_0.get_batch_axes()
+        return capsule
+
 
 @jdc.pytree_dataclass
 class Box(CollGeom):
