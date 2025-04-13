@@ -24,16 +24,12 @@ class Robot:
     link: LinkInfo
     """Link information for the robot."""
 
-    unroll_fk: jdc.Static[bool]
-    """Whether to unroll the forward kinematics `fori_loop`."""
-
     JointVar: jdc.Static[type[optim.Var[Array]]]
     """Variable class for the robot configuration."""
 
     @staticmethod
     def from_urdf(
         urdf: yourdfpy.URDF,
-        unroll_fk: bool = False,
     ) -> Robot:
         """
         Loads a robot kinematic tree from a URDF.
@@ -41,7 +37,6 @@ class Robot:
 
         Args:
             urdf: The URDF to load the robot from.
-            unroll_fk: Whether to unroll the forward kinematics loop (`fori_loop`).
         """
         joint, link = RobotURDFParser.parse(urdf)
 
@@ -56,7 +51,6 @@ class Robot:
         robot = Robot(
             joint=joint,
             link=link,
-            unroll_fk=unroll_fk,
             JointVar=JointVar,
         )
 
@@ -66,6 +60,7 @@ class Robot:
     def forward_kinematics(
         self,
         cfg: Float[Array, "*batch actuated_count"],
+        unroll_fk: jdc.Static[bool] = False,
     ) -> Float[Array, "*batch link_count 7"]:
         """Run forward kinematics on the robot's links, in the provided configuration.
 
@@ -127,7 +122,7 @@ class Robot:
             upper=self.joint.count,
             body_fun=compute_transform,
             init_val=Ts_world_link_init_sorted,
-            unroll=self.unroll_fk,
+            unroll=unroll_fk,
         )
 
         Ts_world_link_joint_indexed = Ts_world_link_sorted[..., topo_order, :]
