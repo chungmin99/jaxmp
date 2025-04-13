@@ -4,19 +4,16 @@ Solver for robot kinematic optimization problems, using the `pyroki.optim` modul
 
 from __future__ import annotations
 
-from typing import Literal, Optional, Callable, Hashable, Sequence, Any
+from typing import Literal, Optional, Callable, Hashable
 
 import jax
 import jax_dataclasses as jdc
-import jaxtyping
-from jax import numpy as jnp
 
-from . import optim
-from ._robot import Robot
+import jaxls
 
 
 def solve(
-    vars: list[optim.Var],
+    vars: list[jaxls.Var],
     factors: list[CostFactor],
     init_vars: list,
     *,
@@ -25,7 +22,7 @@ def solve(
     ] = "conjugate_gradient",
     max_iterations: int = 100,
     verbose: bool = False,
-) -> tuple[optim.VarValues, jax.Array]:
+) -> tuple[jaxls.VarValues, jax.Array]:
     """Solve the robot kinematic optimization problem.
 
     Returns:
@@ -42,12 +39,12 @@ def solve(
                 f"match number of variables ({len(vars)})."
             )
 
-    graph = optim.FactorGraph.make(factors_jaxls, vars, use_onp=False)
+    graph = jaxls.FactorGraph.make(factors_jaxls, vars, use_onp=False)
     solution = graph.solve(
         linear_solver=solver_type,
-        initial_vals=optim.VarValues.make(init_vars),
-        trust_region=optim.TrustRegionConfig(),
-        termination=optim.TerminationConfig(
+        initial_vals=jaxls.VarValues.make(init_vars),
+        trust_region=jaxls.TrustRegionConfig(),
+        termination=jaxls.TerminationConfig(
             gradient_tolerance=1e-5,
             parameter_tolerance=1e-5,
             max_iterations=max_iterations,
@@ -85,27 +82,27 @@ class CostFactor[*Args]:
         factor = cls(cost_inputs=cost_inputs, weights=weights)
         return factor
 
-    def cost_fn(self, vals: optim.VarValues, *args: *Args) -> jax.Array:
+    def cost_fn(self, vals: jaxls.VarValues, *args: *Args) -> jax.Array:
         raise NotImplementedError
 
-    def _make_factor(self) -> optim.Factor:
+    def _make_factor(self) -> jaxls.Factor:
         """
         Make a factor from the cost function.
         There must be at least one variable `optim.Var` provided in the arguments.
         """
 
         assert len(self.cost_inputs) > 0
-        assert any(isinstance(arg, optim.Var) for arg in self.cost_inputs)
+        assert any(isinstance(arg, jaxls.Var) for arg in self.cost_inputs)
 
         # Add weights to the cost inputs if provided.
-        return optim.Factor(
+        return jaxls.Factor(
             self._cost_fn,
             self.cost_inputs,
             signature_fn=self._signature_fn,
             name=self.__class__.__name__,
         )
 
-    def _cost_fn(self, vals: optim.VarValues, *args: *Args) -> jax.Array:
+    def _cost_fn(self, vals: jaxls.VarValues, *args: *Args) -> jax.Array:
         """
         Wrapper cost function to apply weights and flatten the residual.
         """

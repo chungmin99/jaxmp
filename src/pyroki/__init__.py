@@ -17,4 +17,3 @@ from ._costs import FivePointAccelerationCost as FivePointAccelerationCost
 from ._costs import FivePointJerkCost as FivePointJerkCost
 
 from . import viewer as viewer
-from . import optim as optim

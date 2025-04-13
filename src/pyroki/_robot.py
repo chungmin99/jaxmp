@@ -9,7 +9,7 @@ from jax import Array
 from jax import numpy as jnp
 from jaxtyping import Float
 
-from . import optim
+import jaxls
 
 from ._robot_urdf_parser import JointInfo, LinkInfo, RobotURDFParser
 
@@ -24,7 +24,7 @@ class Robot:
     link: LinkInfo
     """Link information for the robot."""
 
-    JointVar: jdc.Static[type[optim.Var[Array]]]
+    JointVar: jdc.Static[type[jaxls.Var[Array]]]
     """Variable class for the robot configuration."""
 
     @staticmethod
@@ -153,7 +153,7 @@ class Robot:
         default_val: Float[Array, "* actuated_count"],
         num_actuated_joints: int,
         joint_vel_limit: Float[Array, "* actuated_count"],
-    ) -> type[optim.Var[Array]]:
+    ) -> type[jaxls.Var[Array]]:
         """Return a variable class for the robot configuration,
         considering different joint units for revolute/prismatic joints."""
 
@@ -173,7 +173,7 @@ class Robot:
             return cfg + _delta
 
         class JointVar(  # pylint: disable=missing-class-docstring
-            optim.Var[Array],
+            jaxls.Var[Array],
             default_factory=lambda: default_val.copy(),
             tangent_dim=num_actuated_joints,
             retract_fn=retract_fn,

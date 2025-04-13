@@ -23,7 +23,7 @@ dependencies = [
     "jaxtyping",
     "loguru",
     "robot_descriptions",
-    "termcolor",
+    "jaxls @ git+https://github.com/brentyi/jaxls.git",
 ]
 
 [project.optional-dependencies]
